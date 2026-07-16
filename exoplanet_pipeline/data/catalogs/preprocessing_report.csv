@@ -1,0 +1,80 @@
+tic_id,status,reason,out_path,n_cadences,baseline_days,rms_raw,rms_detrended
+TIC_144065872,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_144065872.npz,17310.0,27.881,0.002436,0.000783
+TIC_149603524,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_149603524.npz,17570.0,27.881,0.002408,0.000861
+TIC_201248411,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_201248411.npz,18177.0,27.881,0.002529,0.001227
+TIC_207081058,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_207081058.npz,17685.0,27.576,0.001866,0.00097
+TIC_231663901,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_231663901.npz,17670.0,27.88,0.005144,0.003944
+TIC_231670397,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_231670397.npz,17593.0,27.88,0.001197,0.00096
+TIC_231702397,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_231702397.npz,18204.0,27.88,0.006326,0.006192
+TIC_234523599,gated,rms 0.0146 > 5.0× expected 0.0014,,,,,
+TIC_238176110,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_238176110.npz,17635.0,27.88,0.003128,0.001753
+TIC_25155310,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_25155310.npz,17515.0,27.881,0.001854,0.001301
+TIC_263003176,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_263003176.npz,18164.0,27.88,0.00028,0.00027
+TIC_266980320,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_266980320.npz,18137.0,27.881,0.000684,0.000651
+TIC_278683844,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_278683844.npz,18214.0,27.881,0.000825,0.000697
+TIC_281459670,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_281459670.npz,18023.0,27.881,0.006665,0.005747
+TIC_281541555,gated,rms 0.0090 > 5.0× expected 0.0014,,,,,
+TIC_289793076,gated,rms 0.0087 > 5.0× expected 0.0014,,,,,
+TIC_290131778,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_290131778.npz,16935.0,27.562,0.000996,0.000414
+TIC_29344935,gated,rms 0.0078 > 5.0× expected 0.0014,,,,,
+TIC_29831208,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_29831208.npz,18215.0,27.881,0.001796,0.001758
+TIC_336732616,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_336732616.npz,17541.0,27.743,0.002957,0.002295
+TIC_355703913,gated,rms 0.0070 > 5.0× expected 0.0014,,,,,
+TIC_388104525,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_388104525.npz,17432.0,27.881,0.00366,0.002256
+TIC_38846515,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_38846515.npz,15077.0,26.102,0.001889,0.001157
+TIC_391949880,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_391949880.npz,18222.0,27.88,0.000557,0.000412
+TIC_394137592,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_394137592.npz,17696.0,27.881,0.000435,0.000263
+TIC_52368076,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_52368076.npz,18203.0,27.881,0.001108,0.001081
+TIC_70440470,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_70440470.npz,17873.0,27.614,0.006184,0.005705
+TIC_92352620,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_92352620.npz,17301.0,27.744,0.002573,0.001061
+TIC_97409519,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\TIC_97409519.npz,17011.0,27.691,0.004448,0.003579
+SYN_0000,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0000.npz,17310.0,27.881,0.002436,0.000783
+SYN_0001,gated,rms 0.0070 > 5.0× expected 0.0014,,,,,
+SYN_0002,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0002.npz,17670.0,27.88,0.005144,0.003944
+SYN_0003,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0003.npz,17173.0,27.744,0.002886,0.001063
+SYN_0004,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0004.npz,16980.0,27.832,0.003198,0.000786
+SYN_0005,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0005.npz,17161.0,27.744,0.002746,0.001062
+SYN_0006,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0006.npz,15084.0,26.102,0.001894,0.001168
+SYN_0007,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0007.npz,18023.0,27.881,0.006665,0.005747
+SYN_0008,gated,rms 0.0070 > 5.0× expected 0.0014,,,,,
+SYN_0009,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0009.npz,15077.0,26.102,0.001889,0.001157
+SYN_0010,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0010.npz,17433.0,27.88,0.001347,0.000967
+SYN_0011,gated,rms 0.0070 > 5.0× expected 0.0014,,,,,
+SYN_0012,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0012.npz,17310.0,27.881,0.002436,0.000783
+SYN_0013,gated,rms 0.0078 > 5.0× expected 0.0014,,,,,
+SYN_0014,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0014.npz,18023.0,27.881,0.006665,0.005747
+SYN_0015,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0015.npz,17542.0,27.743,0.002957,0.002296
+SYN_0016,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0016.npz,17541.0,27.743,0.002957,0.002295
+SYN_0017,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0017.npz,17570.0,27.881,0.002408,0.000861
+SYN_0018,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0018.npz,17245.0,27.88,0.002052,0.000967
+SYN_0019,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0019.npz,17301.0,27.744,0.002573,0.001061
+SYN_0020,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0020.npz,17570.0,27.881,0.002408,0.000861
+SYN_0021,gated,rms 0.0087 > 5.0× expected 0.0014,,,,,
+SYN_0022,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0022.npz,16823.0,27.881,0.002676,0.000871
+SYN_0023,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0023.npz,17541.0,27.743,0.002957,0.002295
+SYN_0024,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0024.npz,16079.0,27.744,0.003257,0.00107
+SYN_0025,gated,rms 0.0078 > 5.0× expected 0.0014,,,,,
+SYN_0026,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0026.npz,17556.0,27.881,0.002411,0.000878
+SYN_0027,gated,rms 0.0078 > 5.0× expected 0.0014,,,,,
+SYN_0028,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0028.npz,17592.0,27.88,0.001204,0.000968
+SYN_0029,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0029.npz,17570.0,27.881,0.002408,0.000861
+SYN_0030,gated,rms 0.0079 > 5.0× expected 0.0014,,,,,
+SYN_0031,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0031.npz,18023.0,27.881,0.006665,0.005747
+SYN_0032,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0032.npz,17439.0,27.88,0.002078,0.000963
+SYN_0033,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0033.npz,18023.0,27.881,0.006665,0.005747
+SYN_0034,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0034.npz,15077.0,26.102,0.001889,0.001157
+SYN_0035,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0035.npz,17552.0,27.881,0.002414,0.000864
+SYN_0036,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0036.npz,17310.0,27.881,0.002436,0.000783
+SYN_0037,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0037.npz,17675.0,27.88,0.005146,0.003961
+SYN_0038,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0038.npz,17280.0,27.88,0.001626,0.000965
+SYN_0039,gated,rms 0.0087 > 5.0× expected 0.0014,,,,,
+SYN_0040,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0040.npz,17301.0,27.744,0.002573,0.001061
+SYN_0041,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0041.npz,17593.0,27.88,0.001197,0.00096
+SYN_0042,gated,rms 0.0070 > 5.0× expected 0.0014,,,,,
+SYN_0043,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0043.npz,18024.0,27.881,0.006668,0.005749
+SYN_0044,gated,rms 0.0087 > 5.0× expected 0.0014,,,,,
+SYN_0045,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0045.npz,17672.0,27.88,0.00516,0.003969
+SYN_0046,gated,rms 0.0087 > 5.0× expected 0.0014,,,,,
+SYN_0047,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0047.npz,17670.0,27.88,0.005144,0.003944
+SYN_0048,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0048.npz,17248.0,27.744,0.002584,0.001073
+SYN_0049,done,ok,E:\Multi-Agent-System\exoplanet_pipeline\data\processed\lc_detrended\SYN_0049.npz,17291.0,27.744,0.002621,0.00108
