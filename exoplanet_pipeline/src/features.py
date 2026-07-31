@@ -497,8 +497,14 @@ def extract_features_batch(
     if resume and output_path.exists():
         try:
             existing_df  = pd.read_csv(output_path, dtype={"tic_id": str}, on_bad_lines="skip")
-            already_done = set(existing_df["tic_id"].dropna().astype(str))
-            log.info("RESUME MODE — %d candidates already processed; skipping.", len(already_done))
+            if existing_df is not None and "status" in existing_df.columns:
+                successful_df = existing_df[existing_df["status"] == "done"]
+            elif existing_df is not None and "period" in existing_df.columns:
+                successful_df = existing_df.dropna(subset=["period"])
+            else:
+                successful_df = existing_df
+            already_done = set(successful_df["tic_id"].dropna().astype(str)) if successful_df is not None else set()
+            log.info("RESUME MODE — %d candidates successfully processed; re-running remaining failed/incomplete targets.", len(already_done))
         except Exception as e:
             log.warning("Could not load corrupted feature matrix for resume (%s). Resetting for fresh header.", e)
             try:
