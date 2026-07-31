@@ -589,7 +589,7 @@ def extract_features_batch(
     clear_gpu_cache()
 
     # ── Reload full CSV and impute missing stellar params ─────────────────────
-    df = pd.read_csv(output_path, dtype={"tic_id": str})
+    df = pd.read_csv(output_path, dtype={"tic_id": str}, on_bad_lines="skip")
 
     stellar_cols = ["stellar_Teff", "stellar_logg", "stellar_rad",
                     "stellar_mass", "stellar_dist_pc", "stellar_metallicity"]
