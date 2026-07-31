@@ -93,14 +93,14 @@ CATALOGS_DIR.mkdir(parents=True, exist_ok=True)
 # ─────────────────────────────────────────────────────────────────────────────
 TLS_PERIOD_MIN      = 0.5      # days
 TLS_PERIOD_MAX      = 27.0     # days  (1 TESS sector)
-TLS_OVERSAMPLING    = 5
+TLS_OVERSAMPLING    = 3        # Standard TLS oversampling (fast & accurate)
 TLS_DURATION_STEP   = 1.05
 TLS_SDE_THRESHOLD   = 5.0
 N_PHASE_BINS        = 200
 SECONDARY_PHASE     = 0.5
 
 CHECKPOINT_EVERY    = 10       # Save to disk every N rows (reduces I/O)
-TASK_TIMEOUT_SEC    = 120      # Kill a stuck extraction after this many seconds
+TASK_TIMEOUT_SEC    = 600      # 10 minutes max per target to prevent premature timeout
 MIN_FREE_RAM_GB     = 1.5      # Pause dispatch if available RAM < this
 GPU_FLUSH_EVERY     = 50       # Free GPU cache every N files
 
@@ -231,6 +231,7 @@ def run_tls(time: np.ndarray, flat_flux: np.ndarray) -> dict:
             maximum_period      = min(TLS_PERIOD_MAX, (t[-1] - t[0]) / 2),
             oversampling_factor = TLS_OVERSAMPLING,
             duration_grid_step  = TLS_DURATION_STEP,
+            use_threads         = 2,
             show_progress_bar   = False,
         )
         return results
@@ -495,11 +496,16 @@ def extract_features_batch(
     existing_df: Optional[pd.DataFrame] = None
     if resume and output_path.exists():
         try:
-            existing_df  = pd.read_csv(output_path, dtype={"tic_id": str})
+            existing_df  = pd.read_csv(output_path, dtype={"tic_id": str}, on_bad_lines="skip")
             already_done = set(existing_df["tic_id"].dropna().astype(str))
             log.info("RESUME MODE — %d candidates already processed; skipping.", len(already_done))
         except Exception as e:
-            log.warning("Could not load existing feature matrix for resume: %s", e)
+            log.warning("Could not load corrupted feature matrix for resume (%s). Resetting for fresh header.", e)
+            try:
+                output_path.rename(output_path.with_suffix(".corrupt.bak"))
+            except Exception:
+                pass
+            already_done = set()
 
     pending = [f for f in npz_files if f.stem not in already_done]
     if len(npz_files) - len(pending):
