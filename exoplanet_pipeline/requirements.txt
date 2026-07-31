@@ -1,0 +1,32 @@
+# Core astronomy / signal processing
+numpy
+scipy
+pandas
+astropy
+lightkurve
+transitleastsquares
+
+# ──────────────────────────────────────────────────────────
+# GPU Acceleration — RTX 4050 Laptop GPU
+# Driver: 591.86  |  CUDA runtime: 12.9  |  nvcc toolkit: 11.8
+# ──────────────────────────────────────────────────────────
+
+# CuPy — matches the installed nvcc toolkit (CUDA 11.8)
+cupy-cuda11x
+
+# PyTorch CUDA 11.8 wheel (bundled CUDA runtime, no toolkit needed)
+# Install with:
+#   pip install torch==2.7.1+cu118 --index-url https://download.pytorch.org/whl/cu118
+torch
+
+# System / monitoring
+psutil         # RAM monitoring (required for memory guard in features.py)
+tqdm           # Progress bars with ETA and VRAM stats
+
+# Feature extraction
+tsfresh        # Optional — kept as fallback reference (not used by default)
+
+# Pipeline utilities
+joblib
+scikit-learn
+matplotlib

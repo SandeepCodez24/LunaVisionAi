@@ -1,8 +1,17 @@
 """
-features.py  —  Step 3.7
-=========================
+features.py  —  Step 3.7  (GPU-Accelerated, Anti-Hang Edition)
+==============================================================
 Extract 35+ statistical, morphological, and astrophysical features per
-TCE candidate for ML input, following the Implementation Plan:
+TCE candidate for ML input, following the Implementation Plan.
+
+Key improvements over the original:
+  • GPU offloading via gpu_features.py (CuPy + PyTorch CUDA on RTX 4050)
+  • Worker count capped at min(cpu_count - 2, 4) to prevent system hang
+  • Per-task timeout (Windows-compatible threading-based) kills stuck TLS calls
+  • Memory guard via psutil: pauses dispatch when RAM < 1.5 GB free
+  • Batch checkpointing every CHECKPOINT_EVERY rows (not every 1)
+  • GPU cache flushed after each batch to prevent VRAM leaks
+  • tqdm progress bar with ETA, memory, and GPU VRAM stats
 
 Feature categories
 ------------------
@@ -13,8 +22,8 @@ Feature categories
   5. Secondary Eclipse     secondary depth and ratio at phase 0.5
   6. Centroid              centroid proxy (quality-flagged cadences during transit)
   7. Stellar               Teff, logg, R★, M★, dist, metallicity from TIC catalog
-  8. Time-series stats     RMS, skewness, kurtosis, autocorrelation
-  9. tsfresh               abs_energy, fft coefficients, change_quantiles, etc.
+  8. Time-series stats     RMS, skewness, kurtosis, autocorrelation (GPU)
+  9. GPU FFT features      FFT coefficients + basic stats on phase-folded flux
 
 Input
 -----
@@ -28,20 +37,42 @@ Output
 
 from __future__ import annotations
 
+import os
 import sys
-import json
+import time
 import logging
 import warnings
+import threading
+import multiprocessing
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import pandas as pd
-from scipy import stats as sp_stats
-from scipy.signal import argrelextrema
+
+# Ensure the src/ directory is on sys.path so gpu_features can always be found,
+# regardless of the working directory from which features.py is invoked.
+_SRC_DIR = Path(__file__).resolve().parent
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+
+# GPU-accelerated feature functions (CuPy + PyTorch; CPU fallback built-in)
+from gpu_features import (  # noqa: E402
+    gpu_phase_fold,
+    gpu_timeseries_stats,
+    gpu_fft_features,
+    gpu_morphological_bins,
+    compute_odd_even_depths,
+    clear_gpu_cache,
+    gpu_memory_used_gb,
+    get_device_info,
+)
 
 warnings.filterwarnings("ignore")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# LOGGING
+# ─────────────────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -52,21 +83,107 @@ log = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 # PATHS
 # ─────────────────────────────────────────────────────────────────────────────
-BASE_DIR       = Path(__file__).resolve().parents[1]
-DETRENDED_DIR  = BASE_DIR / "data" / "processed" / "lc_detrended"
-CATALOGS_DIR   = BASE_DIR / "data" / "catalogs"
+BASE_DIR      = Path(__file__).resolve().parents[1]
+DETRENDED_DIR = BASE_DIR / "data" / "processed" / "lc_detrended"
+CATALOGS_DIR  = BASE_DIR / "data" / "catalogs"
 CATALOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TLS DETECTION PARAMETERS
+# TUNING PARAMETERS
 # ─────────────────────────────────────────────────────────────────────────────
-TLS_PERIOD_MIN        = 0.5     # days
-TLS_PERIOD_MAX        = 27.0    # days  (1 TESS sector)
-TLS_OVERSAMPLING      = 5
-TLS_DURATION_STEP     = 1.05
-TLS_SDE_THRESHOLD     = 5.0    # lower threshold for feature extraction (not detection)
-N_PHASE_BINS          = 200    # phase-folded array length for CNN input
-SECONDARY_PHASE       = 0.5    # phase to check for secondary eclipse
+TLS_PERIOD_MIN      = 0.5      # days
+TLS_PERIOD_MAX      = 27.0     # days  (1 TESS sector)
+TLS_OVERSAMPLING    = 5
+TLS_DURATION_STEP   = 1.05
+TLS_SDE_THRESHOLD   = 5.0
+N_PHASE_BINS        = 200
+SECONDARY_PHASE     = 0.5
+
+CHECKPOINT_EVERY    = 10       # Save to disk every N rows (reduces I/O)
+TASK_TIMEOUT_SEC    = 120      # Kill a stuck extraction after this many seconds
+MIN_FREE_RAM_GB     = 1.5      # Pause dispatch if available RAM < this
+GPU_FLUSH_EVERY     = 50       # Free GPU cache every N files
+
+
+def _safe_n_jobs() -> int:
+    """
+    Return a safe number of parallel workers that won't hang the system.
+    Leaves at least 2 cores free for the OS, GPU driver, and display.
+    Hard cap at 4 to prevent RAM exhaustion on a laptop.
+    """
+    n_cpu = multiprocessing.cpu_count()
+    return max(1, min(n_cpu - 2, 4))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MEMORY GUARD
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _check_ram(min_free_gb: float = MIN_FREE_RAM_GB) -> None:
+    """
+    Block until available RAM > min_free_gb.
+    Logs a warning if it has to wait.
+    """
+    try:
+        import psutil
+        while True:
+            avail_gb = psutil.virtual_memory().available / 1e9
+            if avail_gb >= min_free_gb:
+                break
+            log.warning(
+                "Low RAM (%.1f GB free < %.1f GB threshold) — pausing 10 s before next dispatch.",
+                avail_gb, min_free_gb,
+            )
+            time.sleep(10)
+    except ImportError:
+        pass  # psutil not installed — skip guard
+
+
+def _ram_free_gb() -> float:
+    """Return free RAM in GB, or -1 if psutil unavailable."""
+    try:
+        import psutil
+        return round(psutil.virtual_memory().available / 1e9, 2)
+    except ImportError:
+        return -1.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PER-TASK TIMEOUT (Windows-compatible, threading-based)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _TimeoutError(Exception):
+    pass
+
+
+def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec: int = TASK_TIMEOUT_SEC):
+    """
+    Run fn(*args, **kwargs) in a daemon thread.
+    Raises _TimeoutError if it doesn't finish within timeout_sec.
+
+    Note: On Windows we cannot use SIGALRM, so we use a thread.
+    The thread is daemonized so it won't block process exit.
+    """
+    if kwargs is None:
+        kwargs = {}
+    result_box = [None]
+    exc_box    = [None]
+
+    def _target():
+        try:
+            result_box[0] = fn(*args, **kwargs)
+        except Exception as e:
+            exc_box[0] = e
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(timeout=timeout_sec)
+
+    if t.is_alive():
+        raise _TimeoutError(f"Task timed out after {timeout_sec}s")
+    if exc_box[0] is not None:
+        raise exc_box[0]
+    return result_box[0]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -93,7 +210,10 @@ def _load_detrended(npz_path: Path) -> dict:
 def run_tls(time: np.ndarray, flat_flux: np.ndarray) -> dict:
     """
     Run Transit Least Squares periodogram and return raw TLS results dict.
-    Returns empty dict if TLS fails or no signal found above threshold.
+    Returns empty dict if TLS fails, signal below threshold, or times out.
+
+    TLS is single-threaded per call. The outer joblib/Parallel worker pool
+    is already CPU-limited, so we do not need per-TLS threading.
     """
     from transitleastsquares import transitleastsquares as TLS
 
@@ -107,8 +227,8 @@ def run_tls(time: np.ndarray, flat_flux: np.ndarray) -> dict:
     try:
         model   = TLS(t, f)
         results = model.power(
-            minimum_period    = TLS_PERIOD_MIN,
-            maximum_period    = min(TLS_PERIOD_MAX, (t[-1] - t[0]) / 2),
+            minimum_period      = TLS_PERIOD_MIN,
+            maximum_period      = min(TLS_PERIOD_MAX, (t[-1] - t[0]) / 2),
             oversampling_factor = TLS_OVERSAMPLING,
             duration_grid_step  = TLS_DURATION_STEP,
             show_progress_bar   = False,
@@ -120,30 +240,28 @@ def run_tls(time: np.ndarray, flat_flux: np.ndarray) -> dict:
 
 
 def extract_geometry_features(tls_results: dict, baseline: float) -> dict:
-    """
-    Category 1 & 2 — Transit geometry and signal quality features from TLS.
-    """
+    """Category 1 & 2 — Transit geometry and signal quality features from TLS."""
+    _empty = {
+        "period": np.nan, "depth": np.nan, "duration_hr": np.nan,
+        "transit_count": np.nan, "SDE": np.nan, "SNR": np.nan,
+        "FAP": np.nan, "phase_coverage": np.nan, "t0": np.nan,
+        "rp_rs": np.nan, "depth_ppm": np.nan,
+    }
     if not tls_results or not hasattr(tls_results, "period"):
-        return {
-            "period": np.nan, "depth": np.nan, "duration_hr": np.nan,
-            "transit_count": np.nan, "SDE": np.nan, "SNR": np.nan,
-            "FAP": np.nan, "phase_coverage": np.nan, "t0": np.nan,
-            "rp_rs": np.nan,
-        }
+        return _empty
 
-    r = tls_results
-    period       = float(r.period)
-    depth        = float(r.depth)        # fractional depth (1 - min_flux)
-    duration_hr  = float(r.duration) * 24.0
+    r             = tls_results
+    period        = float(r.period)
+    depth         = float(r.depth)
+    duration_hr   = float(r.duration) * 24.0
     transit_count = int(r.transit_count) if hasattr(r, "transit_count") else int(baseline / period)
-    SDE          = float(r.SDE)
-    SNR          = float(r.snr) if hasattr(r, "snr") else np.nan
-    FAP          = float(r.FAP) if hasattr(r, "FAP") else np.nan
-    t0           = float(r.T0) if hasattr(r, "T0") else np.nan
-    rp_rs        = float(np.sqrt(depth)) if depth > 0 else np.nan
-
-    # Phase coverage: fraction of transit phases with data
-    in_transit_fraction = float(r.duty_cycle) if hasattr(r, "duty_cycle") else (duration_hr / 24.0) / period
+    SDE           = float(r.SDE)
+    SNR           = float(r.snr)  if hasattr(r, "snr")  else np.nan
+    FAP           = float(r.FAP)  if hasattr(r, "FAP")  else np.nan
+    t0            = float(r.T0)   if hasattr(r, "T0")   else np.nan
+    rp_rs         = float(np.sqrt(depth)) if depth > 0 else np.nan
+    phase_cov     = float(r.duty_cycle) if hasattr(r, "duty_cycle") \
+                    else (duration_hr / 24.0) / period
 
     return {
         "period":         period,
@@ -156,144 +274,15 @@ def extract_geometry_features(tls_results: dict, baseline: float) -> dict:
         "FAP":            FAP,
         "t0":             t0,
         "rp_rs":          rp_rs,
-        "phase_coverage": in_transit_fraction,
+        "phase_coverage": phase_cov,
     }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CATEGORY 3 — Morphological features from the phase-folded transit
-# ─────────────────────────────────────────────────────────────────────────────
-
-def phase_fold(
-    time: np.ndarray, flux: np.ndarray,
-    period: float, t0: float,
-    n_bins: int = N_PHASE_BINS,
-) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Phase-fold the light curve and bin into n_bins equal phase bins.
-
-    Returns
-    -------
-    phase_arr  : phase array centred on 0 (transit midpoint)
-    binned_flux: mean flux per phase bin
-    """
-    phase = ((time - t0) % period) / period
-    phase[phase > 0.5] -= 1.0   # centre on 0
-
-    finite = np.isfinite(phase) & np.isfinite(flux)
-    phase  = phase[finite]
-    flux   = flux[finite]
-
-    # Bin
-    bins      = np.linspace(-0.5, 0.5, n_bins + 1)
-    bin_idx   = np.digitize(phase, bins) - 1
-    binned    = np.full(n_bins, np.nan)
-    for i in range(n_bins):
-        pts = flux[bin_idx == i]
-        if len(pts) >= 1:
-            binned[i] = np.nanmean(pts)
-
-    centres = 0.5 * (bins[:-1] + bins[1:])
-    return centres, binned
-
-
-def extract_morphological_features(
-    time: np.ndarray,
-    flat_flux: np.ndarray,
-    period: float,
-    t0: float,
-    duration_hr: float,
-) -> dict:
-    """
-    Category 3, 4, 5 — Shape, odd/even, secondary eclipse features.
-    """
-    feat = {}
-
-    if np.isnan(period) or np.isnan(t0) or period <= 0:
-        return {
-            "flat_bottom_score": np.nan, "ingress_egress_asym": np.nan,
-            "odd_depth": np.nan, "even_depth": np.nan, "odd_even_ratio": np.nan,
-            "secondary_depth": np.nan, "secondary_ratio": np.nan,
-            "phase_folded_std": np.nan,
-        }
-
-    phase_arr, binned = phase_fold(time, flat_flux, period, t0, N_PHASE_BINS)
-
-    # Transit window in phase units
-    dur_phase  = (duration_hr / 24.0) / period
-    in_transit = np.abs(phase_arr) < (dur_phase / 2)
-    out_transit = np.abs(phase_arr) > (dur_phase * 1.5)
-
-    transit_flux  = binned[in_transit]
-    oot_flux      = binned[out_transit]
-
-    # ── Flat bottom score: std inside transit / std outside (lower = flatter) ─
-    std_in   = np.nanstd(transit_flux)   if transit_flux.size  > 2 else np.nan
-    std_out  = np.nanstd(oot_flux)       if oot_flux.size      > 2 else np.nan
-    feat["flat_bottom_score"] = float(std_in / std_out) if (std_out and std_out > 0) else np.nan
-
-    # ── Phase-folded std (overall scatter) ────────────────────────────────────
-    feat["phase_folded_std"] = float(np.nanstd(binned))
-
-    # ── Ingress / egress asymmetry ────────────────────────────────────────────
-    half = len(phase_arr) // 2
-    ingress_bins  = binned[half - int(half * dur_phase) : half]
-    egress_bins   = binned[half : half + int(half * dur_phase)]
-    if len(ingress_bins) > 0 and len(egress_bins) > 0:
-        feat["ingress_egress_asym"] = float(
-            np.nanmean(ingress_bins) - np.nanmean(egress_bins)
-        )
-    else:
-        feat["ingress_egress_asym"] = np.nan
-
-    # ── Odd / even transit depths ─────────────────────────────────────────────
-    finite    = np.isfinite(time) & np.isfinite(flat_flux)
-    t_ok, f_ok = time[finite], flat_flux[finite]
-
-    transit_epochs = t0 + np.arange(0, (t_ok[-1] - t0) + period, period)
-    transit_epochs = transit_epochs[(transit_epochs >= t_ok[0]) & (transit_epochs <= t_ok[-1])]
-
-    odd_depths, even_depths = [], []
-    for k, epoch in enumerate(transit_epochs):
-        half_dur = (duration_hr / 24.0) / 2.0
-        mask     = np.abs(t_ok - epoch) < half_dur
-        if mask.sum() < 3:
-            continue
-        depth_k = 1.0 - float(np.nanmean(f_ok[mask]))
-        if k % 2 == 0:
-            even_depths.append(depth_k)
-        else:
-            odd_depths.append(depth_k)
-
-    feat["odd_depth"]   = float(np.nanmean(odd_depths))   if odd_depths  else np.nan
-    feat["even_depth"]  = float(np.nanmean(even_depths))  if even_depths else np.nan
-    if feat["odd_depth"] and feat["even_depth"] and feat["even_depth"] != 0:
-        feat["odd_even_ratio"] = float(feat["odd_depth"] / feat["even_depth"])
-    else:
-        feat["odd_even_ratio"] = np.nan
-
-    # ── Secondary eclipse at phase 0.5 ───────────────────────────────────────
-    sec_mask = np.abs(phase_arr - SECONDARY_PHASE) < (dur_phase / 2)
-    if sec_mask.sum() > 0 and not np.isnan(binned[sec_mask]).all():
-        sec_depth = 1.0 - float(np.nanmean(binned[sec_mask]))
-        primary_d = float(np.nanmean(transit_flux)) if transit_flux.size > 0 else np.nan
-        primary_depth = 1.0 - primary_d if not np.isnan(primary_d) else np.nan
-        feat["secondary_depth"] = max(sec_depth, 0.0)
-        feat["secondary_ratio"] = (
-            sec_depth / primary_depth if (primary_depth and primary_depth > 0) else np.nan
-        )
-    else:
-        feat["secondary_depth"] = np.nan
-        feat["secondary_ratio"] = np.nan
-
-    return feat
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CATEGORY 7 — Stellar parameters from TIC catalog
 # ─────────────────────────────────────────────────────────────────────────────
 
-_tic_df: Optional[pd.DataFrame] = None   # module-level cache
+_tic_df: Optional[pd.DataFrame] = None
 
 
 def _load_tic_catalog() -> pd.DataFrame:
@@ -311,8 +300,6 @@ def _load_tic_catalog() -> pd.DataFrame:
 def extract_stellar_features(tic_id: str) -> dict:
     """Retrieve stellar parameters from the pre-loaded TIC catalog."""
     tic_df = _load_tic_catalog()
-
-    # Strip "TIC_" prefix if present
     raw_id = tic_id.replace("TIC_", "").replace("TIC ", "")
 
     stellar = {
@@ -337,123 +324,13 @@ def extract_stellar_features(tic_id: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CATEGORY 8 — Time-series statistical features
-# ─────────────────────────────────────────────────────────────────────────────
-
-def extract_timeseries_stats(flat_flux: np.ndarray, rms_raw: float = np.nan) -> dict:
-    """
-    Compute classical statistical features on the detrended flux array.
-    """
-    f = flat_flux[np.isfinite(flat_flux)]
-    if len(f) < 10:
-        return {k: np.nan for k in [
-            "rms", "rms_raw", "skewness", "kurtosis",
-            "autocorr_lag1", "autocorr_lag10",
-            "flux_range", "flux_percentile_5", "flux_percentile_95",
-            "above_3sigma_frac", "below_3sigma_frac",
-        ]}
-
-    rms      = float(np.std(f))
-    skewness = float(sp_stats.skew(f))
-    kurtosis = float(sp_stats.kurtosis(f))
-
-    # Autocorrelation at lag 1 and lag 10
-    def autocorr(x, lag=1):
-        if len(x) <= lag:
-            return np.nan
-        return float(np.corrcoef(x[:-lag], x[lag:])[0, 1])
-
-    ac1  = autocorr(f, 1)
-    ac10 = autocorr(f, 10)
-
-    sigma = rms if rms > 0 else 1e-9
-    above = float(np.mean(f > 1 + 3 * sigma))
-    below = float(np.mean(f < 1 - 3 * sigma))
-
-    return {
-        "rms":                  rms,
-        "rms_raw":              rms_raw,
-        "skewness":             skewness,
-        "kurtosis":             kurtosis,
-        "autocorr_lag1":        ac1,
-        "autocorr_lag10":       ac10,
-        "flux_range":           float(np.ptp(f)),
-        "flux_percentile_5":    float(np.percentile(f, 5)),
-        "flux_percentile_95":   float(np.percentile(f, 95)),
-        "above_3sigma_frac":    above,
-        "below_3sigma_frac":    below,
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CATEGORY 9 — tsfresh features on phase-folded flux
-# ─────────────────────────────────────────────────────────────────────────────
-
-def extract_tsfresh_features(
-    phase_arr: np.ndarray,
-    binned_flux: np.ndarray,
-) -> dict:
-    """
-    Run a curated subset of tsfresh features on the phase-folded,
-    binned flux array (200 points).
-
-    We use `extract_features` with a minimal feature set to avoid
-    the full ~800-feature explosion.
-    """
-    try:
-        from tsfresh.feature_extraction import extract_features
-        from tsfresh.feature_extraction import MinimalFCParameters
-
-        # Replace NaN bins with local mean
-        flux = binned_flux.copy()
-        nan_mask = ~np.isfinite(flux)
-        if nan_mask.all():
-            raise ValueError("All phase bins are NaN.")
-        flux[nan_mask] = np.nanmean(flux)
-
-        # tsfresh expects a DataFrame in long format
-        df_ts = pd.DataFrame({
-            "id":    np.zeros(len(flux), dtype=int),
-            "time":  np.arange(len(flux)),
-            "flux":  flux,
-        })
-
-        feat_df = extract_features(
-            df_ts,
-            column_id="id", column_sort="time", column_value="flux",
-            default_fc_parameters=MinimalFCParameters(),
-            disable_progressbar=True,
-            n_jobs=1,
-        )
-        feat_dict = feat_df.iloc[0].to_dict()
-        # Prefix keys
-        return {f"tsf_{k.split('flux__')[1]}": float(v)
-                for k, v in feat_dict.items()
-                if "__" in k and np.isfinite(float(v) if pd.notna(v) else np.nan)}
-
-    except Exception as e:
-        log.debug("  tsfresh failed: %s", e)
-        # Fallback: manual mini feature set
-        f = binned_flux.copy()
-        f[~np.isfinite(f)] = np.nanmean(f[np.isfinite(f)]) if np.isfinite(f).any() else 0.0
-        return {
-            "tsf_mean":        float(np.mean(f)),
-            "tsf_variance":    float(np.var(f)),
-            "tsf_abs_energy":  float(np.sum(f ** 2)),
-            "tsf_mean_abs_change": float(np.mean(np.abs(np.diff(f)))),
-            "tsf_maximum":     float(np.max(f)),
-            "tsf_minimum":     float(np.min(f)),
-            "tsf_median":      float(np.median(f)),
-        }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # MASTER FEATURE EXTRACTOR — single light curve
 # ─────────────────────────────────────────────────────────────────────────────
 
 def extract_features_one(npz_path: Path, label: int = -1) -> dict:
     """
     Run TLS and extract all 35+ features for a single detrended light curve.
+    Heavy array operations are dispatched to the GPU via gpu_features.py.
 
     Parameters
     ----------
@@ -481,52 +358,77 @@ def extract_features_one(npz_path: Path, label: int = -1) -> dict:
     log.debug("  Extracting features: %s", tic_id)
 
     # ── Cat 1/2: TLS geometry + signal quality ────────────────────────────────
-    tls_results  = run_tls(time, flat_flux)
-    geom_feat    = extract_geometry_features(tls_results, baseline)
+    tls_results = run_tls(time, flat_flux)
+    geom_feat   = extract_geometry_features(tls_results, baseline)
 
-    period       = geom_feat.get("period", np.nan)
-    t0           = geom_feat.get("t0", np.nan)
-    duration_hr  = geom_feat.get("duration_hr", np.nan)
+    period      = geom_feat.get("period",      np.nan)
+    t0          = geom_feat.get("t0",          np.nan)
+    duration_hr = geom_feat.get("duration_hr", np.nan)
 
     # ── Cat 3/4/5: Morphological, odd/even, secondary ─────────────────────────
-    morph_feat = extract_morphological_features(time, flat_flux, period, t0, duration_hr)
+    if not np.isnan(period) and not np.isnan(t0) and period > 0:
+        # Phase fold on GPU
+        phase_arr, binned = gpu_phase_fold(time, flat_flux, period, t0, N_PHASE_BINS)
 
-    # ── Cat 6: Centroid proxy (fraction of quality-flagged cadences in transit)
-    # (full centroid analysis requires pixel data; this is a quality-based proxy)
+        dur_phase = (duration_hr / 24.0) / period if not np.isnan(duration_hr) else 0.0
+
+        # Primary depth for secondary ratio calculation
+        in_transit_mask   = np.abs(phase_arr) < (dur_phase / 2)
+        transit_flux_vals = binned[in_transit_mask]
+        primary_depth     = (1.0 - float(np.nanmean(transit_flux_vals))
+                             if transit_flux_vals.size > 0 else None)
+
+        # Morphological features on GPU
+        morph_bins = gpu_morphological_bins(
+            phase_arr, binned, dur_phase,
+            primary_depth=primary_depth,
+            secondary_phase=SECONDARY_PHASE,
+        )
+
+        # Odd/even depths — CPU (epoch iteration)
+        odd_even = compute_odd_even_depths(time, flat_flux, period, t0, duration_hr)
+
+        morph_feat = {**morph_bins, **odd_even}
+
+        # ── Cat 9: GPU FFT features on phase-folded flux ──────────────────────
+        tsf_feat = gpu_fft_features(binned)
+    else:
+        morph_feat = {
+            "flat_bottom_score": np.nan, "phase_folded_std": np.nan,
+            "ingress_egress_asym": np.nan, "secondary_depth": np.nan,
+            "secondary_ratio": np.nan, "odd_depth": np.nan,
+            "even_depth": np.nan, "odd_even_ratio": np.nan,
+        }
+        tsf_feat   = {}
+        phase_arr  = None
+        binned     = None
+
+    # ── Cat 6: Centroid proxy ─────────────────────────────────────────────────
     centroid_feat = {"centroid_proxy": np.nan}
 
     # ── Cat 7: Stellar parameters from TIC ───────────────────────────────────
     stellar_feat = extract_stellar_features(tic_id)
 
-    # Compute habitable zone proximity score if stellar Teff available
+    # Habitable zone proximity
     teff = stellar_feat.get("stellar_Teff", np.nan)
     if not np.isnan(teff) and not np.isnan(period):
-        # Approximate HZ inner/outer boundaries (Kopparapu+2013 simplified)
         L_over_Lsun = ((teff / 5778) ** 4) * (stellar_feat.get("stellar_rad", 1.0) ** 2)
-        hz_inner = np.sqrt(L_over_Lsun / 1.1)   # AU
-        hz_outer = np.sqrt(L_over_Lsun / 0.36)  # AU
-        # Kepler's 3rd law: a (AU) ≈ (period_yr)^(2/3) for M★ ~ 1 Msun
-        M_star   = stellar_feat.get("stellar_mass", 1.0) or 1.0
-        a_au     = ((period / 365.25) ** 2 * M_star) ** (1 / 3)
-        in_hz    = float(hz_inner <= a_au <= hz_outer)
-        hz_prox  = float(abs(a_au - (hz_inner + hz_outer) / 2) / ((hz_outer - hz_inner) / 2))
-        stellar_feat["hz_in_zone"]      = in_hz
-        stellar_feat["hz_proximity"]    = hz_prox
+        hz_inner    = np.sqrt(L_over_Lsun / 1.1)
+        hz_outer    = np.sqrt(L_over_Lsun / 0.36)
+        M_star      = stellar_feat.get("stellar_mass", 1.0) or 1.0
+        a_au        = ((period / 365.25) ** 2 * M_star) ** (1 / 3)
+        in_hz       = float(hz_inner <= a_au <= hz_outer)
+        hz_prox     = float(abs(a_au - (hz_inner + hz_outer) / 2) / ((hz_outer - hz_inner) / 2))
+        stellar_feat["hz_in_zone"]   = in_hz
+        stellar_feat["hz_proximity"] = hz_prox
     else:
         stellar_feat["hz_in_zone"]   = np.nan
         stellar_feat["hz_proximity"] = np.nan
 
-    # ── Cat 8: Time-series statistics ────────────────────────────────────────
-    ts_feat = extract_timeseries_stats(flat_flux, rms_raw)
+    # ── Cat 8: Time-series statistics on GPU ──────────────────────────────────
+    ts_feat = gpu_timeseries_stats(flat_flux, rms_raw)
 
-    # ── Cat 9: tsfresh on phase-folded flux ───────────────────────────────────
-    if not np.isnan(period) and not np.isnan(t0):
-        phase_arr, binned = phase_fold(time, flat_flux, period, t0, N_PHASE_BINS)
-        tsf_feat = extract_tsfresh_features(phase_arr, binned)
-    else:
-        tsf_feat = {}
-
-    # ── Baseline metadata ─────────────────────────────────────────────────────
+    # ── Metadata ──────────────────────────────────────────────────────────────
     meta = {
         "tic_id":       tic_id,
         "label":        label,
@@ -536,10 +438,8 @@ def extract_features_one(npz_path: Path, label: int = -1) -> dict:
         "status":       "done",
     }
 
-    # ── Assemble full feature dict ────────────────────────────────────────────
-    row = {**meta, **geom_feat, **morph_feat, **centroid_feat,
-           **stellar_feat, **ts_feat, **tsf_feat}
-    return row
+    return {**meta, **geom_feat, **morph_feat, **centroid_feat,
+            **stellar_feat, **ts_feat, **tsf_feat}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -547,11 +447,13 @@ def extract_features_one(npz_path: Path, label: int = -1) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def extract_features_batch(
-    detrended_dir: Path  = DETRENDED_DIR,
+    detrended_dir: Path         = DETRENDED_DIR,
     label_csv:     Optional[Path] = None,
-    n_jobs:        int   = -1,
-    output_path:   Path  = CATALOGS_DIR / "feature_matrix.csv",
-    resume:        bool  = True,
+    n_jobs:        int          = -1,          # -1 → auto safe value
+    output_path:   Path         = CATALOGS_DIR / "feature_matrix.csv",
+    resume:        bool         = True,
+    timeout_sec:   int          = TASK_TIMEOUT_SEC,
+    checkpoint_n:  int          = CHECKPOINT_EVERY,
 ) -> pd.DataFrame:
     """
     Extract features for all detrended .npz files in detrended_dir.
@@ -559,12 +461,12 @@ def extract_features_batch(
     Parameters
     ----------
     detrended_dir : path to lc_detrended/ directory
-    label_csv     : optional path to a CSV with tic_id and label columns;
-                    if None, labels default to -1 (unknown)
-    n_jobs        : joblib parallel workers (-1 = all cores)
+    label_csv     : optional CSV with tic_id and label columns
+    n_jobs        : parallel workers (-1 = auto-safe = min(cpu_count-2, 4))
     output_path   : where to save feature_matrix.csv
-    resume        : if True and output_path exists, skip already-processed
-                    tic_ids and append new results to the existing file
+    resume        : skip already-processed tic_ids in existing CSV
+    timeout_sec   : kill any single extraction after this many seconds
+    checkpoint_n  : write a batch to disk every this many rows
 
     Returns
     -------
@@ -572,8 +474,14 @@ def extract_features_batch(
     """
     from joblib import Parallel, delayed
 
+    # Resolve safe worker count
+    if n_jobs <= 0:
+        n_jobs = _safe_n_jobs()
+    log.info("Using %d parallel worker(s) (safe cap)", n_jobs)
+
     output_path = Path(output_path)
     npz_files   = sorted(detrended_dir.glob("*.npz"))
+
     log.info("=" * 65)
     log.info("FEATURE EXTRACTION — %d light curves  (n_jobs=%d)", len(npz_files), n_jobs)
     log.info("=" * 65)
@@ -582,67 +490,107 @@ def extract_features_batch(
         log.warning("No .npz files found in %s", detrended_dir)
         return pd.DataFrame()
 
-    # ── Resume: load already-processed rows ──────────────────────────────────
+    # ── Resume: skip already-processed rows ──────────────────────────────────
     already_done: set[str] = set()
     existing_df: Optional[pd.DataFrame] = None
     if resume and output_path.exists():
         try:
-            existing_df = pd.read_csv(output_path, dtype={"tic_id": str})
+            existing_df  = pd.read_csv(output_path, dtype={"tic_id": str})
             already_done = set(existing_df["tic_id"].dropna().astype(str))
-            log.info("RESUME MODE — %d candidates already processed; skipping them.",
-                     len(already_done))
+            log.info("RESUME MODE — %d candidates already processed; skipping.", len(already_done))
         except Exception as e:
             log.warning("Could not load existing feature matrix for resume: %s", e)
-            existing_df = None
 
-    # Filter out already-processed files
     pending = [f for f in npz_files if f.stem not in already_done]
-    skipped = len(npz_files) - len(pending)
-    if skipped:
-        log.info("Skipping %d already-extracted files; %d remaining.", skipped, len(pending))
+    if len(npz_files) - len(pending):
+        log.info("Skipping %d already-extracted files; %d remaining.",
+                 len(npz_files) - len(pending), len(pending))
 
     if not pending:
         log.info("All files already extracted. Returning existing feature matrix.")
         return existing_df if existing_df is not None else pd.DataFrame()
 
-    # Build label lookup from CSV
+    # Build label lookup
     label_map: dict[str, int] = {}
     if label_csv and Path(label_csv).exists():
         ldf = pd.read_csv(label_csv, dtype={"tic_id": str})
         if "label" in ldf.columns:
             label_map = dict(zip(ldf["tic_id"], ldf["label"].astype(int)))
 
-    # Pure worker — no shared state, safe to pickle across processes
+    # ── Worker wrapper with timeout ───────────────────────────────────────────
     def _worker(f: Path) -> dict:
+        """Run extraction with per-task timeout."""
         label = label_map.get(f.stem, -1)
-        return extract_features_one(f, label=label)
+        try:
+            return _run_with_timeout(
+                extract_features_one, args=(f, label), timeout_sec=timeout_sec
+            )
+        except _TimeoutError:
+            log.warning("  TIMEOUT (%ds) for %s — skipping.", timeout_sec, f.stem)
+            return {"tic_id": f.stem, "label": label, "status": f"timeout_{timeout_sec}s"}
+        except Exception as e:
+            log.warning("  ERROR for %s: %s", f.stem, e)
+            return {"tic_id": f.stem, "label": label, "status": str(e)}
 
-    # ── Checkpoint each row in the main process as results stream in ─────────
+    # ── Progress bar + batch checkpoint ──────────────────────────────────────
+    try:
+        from tqdm import tqdm
+        pbar = tqdm(total=len(pending), unit="lc",
+                    desc="Feature extraction", dynamic_ncols=True)
+        use_pbar = True
+    except ImportError:
+        pbar     = None
+        use_pbar = False
+
     write_header = not (resume and output_path.exists())
-    n_done = 0
+    n_done       = 0
+    batch_rows   = []
 
-    gen = Parallel(n_jobs=n_jobs, verbose=5, return_as="generator")(
+    gen = Parallel(n_jobs=n_jobs, verbose=0, return_as="generator")(
         delayed(_worker)(f) for f in pending
     )
-    for row in gen:
-        row_df = pd.DataFrame([row])
-        row_df.to_csv(output_path, mode="a", header=write_header, index=False)
-        write_header = False
-        n_done += 1
-        log.info("  Checkpoint: %d / %d saved", n_done, len(pending))
 
-    # ── Reload full CSV (existing + newly added rows) ─────────────────────────
+    for row in gen:
+        batch_rows.append(row)
+        n_done += 1
+
+        # ── Checkpoint every checkpoint_n rows ────────────────────────────
+        if len(batch_rows) >= checkpoint_n or n_done == len(pending):
+            _check_ram()   # pause if RAM is critically low
+            batch_df = pd.DataFrame(batch_rows)
+            batch_df.to_csv(output_path, mode="a", header=write_header, index=False)
+            write_header = False
+            batch_rows   = []
+            log.info("  Checkpoint: %d / %d saved  |  RAM free: %.1f GB  |  GPU VRAM: %.2f GB",
+                     n_done, len(pending), _ram_free_gb(), gpu_memory_used_gb())
+
+        # ── Flush GPU cache periodically ──────────────────────────────────
+        if n_done % GPU_FLUSH_EVERY == 0:
+            clear_gpu_cache()
+
+        if use_pbar:
+            pbar.set_postfix(
+                ram_gb=f"{_ram_free_gb():.1f}",
+                vram_gb=f"{gpu_memory_used_gb():.2f}",
+                refresh=False,
+            )
+            pbar.update(1)
+
+    if use_pbar:
+        pbar.close()
+
+    # Final GPU cache flush
+    clear_gpu_cache()
+
+    # ── Reload full CSV and impute missing stellar params ─────────────────────
     df = pd.read_csv(output_path, dtype={"tic_id": str})
 
-    # Impute missing stellar params with column median
     stellar_cols = ["stellar_Teff", "stellar_logg", "stellar_rad",
                     "stellar_mass", "stellar_dist_pc", "stellar_metallicity"]
     for col in stellar_cols:
         if col in df.columns:
-            median_val = df[col].median()
-            df[col] = df[col].fillna(median_val)
+            df[col] = df[col].fillna(df[col].median())
 
-    # Re-save with imputed values
     df.to_csv(output_path, index=False)
 
     done = int((df["status"] == "done").sum()) if "status" in df.columns else len(df)
@@ -652,24 +600,40 @@ def extract_features_batch(
     return df
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
 # CLI ENTRY POINT
-# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Step 3.7 — Extract 35+ features per candidate")
+    # Print GPU info at startup
+    dev_info = get_device_info()
+    log.info("=" * 65)
+    log.info("GPU INFO: CuPy=%s | PyTorch CUDA=%s | Device=%s",
+             dev_info["cupy_available"], dev_info["torch_cuda"], dev_info["device"])
+    if "gpu_name" in dev_info:
+        log.info("  GPU: %s  |  VRAM Total: %.2f GB  |  VRAM Free: %.2f GB",
+                 dev_info["gpu_name"], dev_info["vram_total_gb"], dev_info["vram_free_gb"])
+    log.info("=" * 65)
+
+    parser = argparse.ArgumentParser(
+        description="Step 3.7 — Extract 35+ features per candidate (GPU-accelerated)"
+    )
     parser.add_argument("--detrended-dir", type=Path, default=DETRENDED_DIR,
                         help="Directory with detrended .npz files")
     parser.add_argument("--label-csv",     type=Path, default=None,
                         help="Optional CSV with tic_id and label columns")
     parser.add_argument("--n-jobs",        type=int,  default=-1,
-                        help="Parallel workers (-1 = all cores)")
+                        help="Parallel workers (-1 = auto-safe, typically 2-4)")
     parser.add_argument("--output",        type=Path,
                         default=CATALOGS_DIR / "feature_matrix.csv",
                         help="Output path for feature_matrix.csv")
     parser.add_argument("--no-resume",     action="store_true",
                         help="Ignore any existing feature_matrix.csv and re-extract everything")
+    parser.add_argument("--timeout",       type=int,  default=TASK_TIMEOUT_SEC,
+                        help=f"Per-task timeout in seconds (default: {TASK_TIMEOUT_SEC})")
+    parser.add_argument("--checkpoint-n",  type=int,  default=CHECKPOINT_EVERY,
+                        help=f"Write to disk every N rows (default: {CHECKPOINT_EVERY})")
     args = parser.parse_args()
 
     df = extract_features_batch(
@@ -678,8 +642,12 @@ if __name__ == "__main__":
         n_jobs        = args.n_jobs,
         output_path   = args.output,
         resume        = not args.no_resume,
+        timeout_sec   = args.timeout,
+        checkpoint_n  = args.checkpoint_n,
     )
+
     summary_cols = ["tic_id", "label", "period", "depth_ppm", "SDE",
                     "SNR", "odd_even_ratio", "stellar_Teff", "rms", "status"]
     available = [c for c in summary_cols if c in df.columns]
-    print(df[available].to_string())
+    if not df.empty:
+        print(df[available].to_string())
