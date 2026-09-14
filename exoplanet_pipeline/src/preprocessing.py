@@ -116,14 +116,13 @@ def fill_gaps(
     gap_thresh = cadence * (max_gap_cadences + 1.5)   # ~4.5 cadences
     large_gaps = dt > gap_thresh
 
+    # Mark the cadence right after each large gap. Vectorised: gap_mask[i+1]
+    # for every i where large_gaps[i] is True, without a Python-level loop
+    # over the full cadence array (this ran on every light curve in the
+    # batch, so it was a real cost at full-sector scale).
     gap_mask = np.zeros(len(time), dtype=bool)
-    flux_out  = flux.copy()
-
-    for i, is_large in enumerate(large_gaps):
-        gap_start_idx = i + 1
-        # Mark large gap cadences
-        if is_large:
-            gap_mask[gap_start_idx] = True
+    gap_mask[1:][large_gaps] = True
+    flux_out = flux.copy()
 
     # Fill NaN values using linear interpolation on the clean series
     nan_mask = ~np.isfinite(flux_out)

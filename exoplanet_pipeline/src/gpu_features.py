@@ -128,7 +128,16 @@ def _gpu_phase_fold_cupy(
     t0: float,
     n_bins: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """CuPy implementation of phase folding."""
+    """
+    CuPy implementation of phase folding.
+
+    Binning is done with cp.bincount (sum-per-bin / count-per-bin) instead of
+    a per-bin Python loop. The old loop launched ~n_bins tiny CUDA kernels
+    (a boolean-mask + reduction each) per light curve, so wall-clock time was
+    dominated by kernel-launch overhead rather than actual compute — this
+    collapses that to a fixed handful of vectorised kernel launches regardless
+    of n_bins, which is the standard GPU histogram/binning pattern.
+    """
     import cupy as cp
 
     # Transfer to GPU
@@ -142,18 +151,22 @@ def _gpu_phase_fold_cupy(
     phase  = phase[finite]
     f_gpu  = f_gpu[finite]
 
-    # Vectorised binning using cp.digitize
     edges   = cp.linspace(-0.5, 0.5, n_bins + 1)
-    bin_idx = cp.digitize(phase, edges) - 1
-    bin_idx = cp.clip(bin_idx, 0, n_bins - 1)
-
-    binned = cp.full(n_bins, cp.nan, dtype=cp.float64)
-    for i in range(n_bins):
-        mask = bin_idx == i
-        if mask.any():
-            binned[i] = cp.nanmean(f_gpu[mask])
-
     centres = 0.5 * (edges[:-1] + edges[1:])
+
+    if phase.size == 0:
+        return cp.asnumpy(centres), np.full(n_bins, np.nan)
+
+    bin_idx = cp.digitize(phase, edges) - 1
+    in_range = (bin_idx >= 0) & (bin_idx < n_bins)
+    bin_idx  = bin_idx[in_range]
+    f_valid  = f_gpu[in_range]
+
+    sums    = cp.bincount(bin_idx, weights=f_valid, minlength=n_bins)
+    counts  = cp.bincount(bin_idx, minlength=n_bins)
+    binned  = cp.full(n_bins, cp.nan, dtype=cp.float64)
+    nonzero = counts > 0
+    binned[nonzero] = sums[nonzero] / counts[nonzero]
 
     # Transfer back to CPU
     return cp.asnumpy(centres), cp.asnumpy(binned)
@@ -166,7 +179,12 @@ def _cpu_phase_fold(
     t0: float,
     n_bins: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """NumPy fallback for phase folding."""
+    """
+    NumPy fallback for phase folding. Vectorised via np.bincount (sum-per-bin
+    / count-per-bin) instead of a per-bin Python loop — same speedup rationale
+    as the CuPy path, and it removes a real CPU bottleneck too since this
+    function runs once per candidate across every worker process.
+    """
     phase = ((time - t0) % period) / period
     phase = np.where(phase > 0.5, phase - 1.0, phase)
 
@@ -175,14 +193,22 @@ def _cpu_phase_fold(
     flux   = flux[finite]
 
     bins    = np.linspace(-0.5, 0.5, n_bins + 1)
-    bin_idx = np.digitize(phase, bins) - 1
-    binned  = np.full(n_bins, np.nan)
-    for i in range(n_bins):
-        pts = flux[bin_idx == i]
-        if len(pts) >= 1:
-            binned[i] = np.nanmean(pts)
-
     centres = 0.5 * (bins[:-1] + bins[1:])
+
+    if phase.size == 0:
+        return centres, np.full(n_bins, np.nan)
+
+    bin_idx  = np.digitize(phase, bins) - 1
+    in_range = (bin_idx >= 0) & (bin_idx < n_bins)
+    bin_idx  = bin_idx[in_range]
+    flux_v   = flux[in_range]
+
+    sums    = np.bincount(bin_idx, weights=flux_v, minlength=n_bins)
+    counts  = np.bincount(bin_idx, minlength=n_bins)
+    binned  = np.full(n_bins, np.nan)
+    nonzero = counts > 0
+    binned[nonzero] = sums[nonzero] / counts[nonzero]
+
     return centres, binned
 
 

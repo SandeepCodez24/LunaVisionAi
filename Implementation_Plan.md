@@ -3,6 +3,8 @@
 > **Source Document**: College_Project.pdf — *AI-Enabled Exoplanet Detection Pipeline* (PRD v1.0, June 2026)  
 > **Goal**: Autonomously detect and classify exoplanet transit signals in noisy NASA TESS light curves.  
 > **Target**: ≥90% macro-F1 across 4 signal classes | ≤90 min runtime for a full 25k-target TESS sector
+>
+> **Scope note**: This document remains the spec for the *scientific pipeline* (Stages 1–6, the multi-agent design, and acceptance criteria below). For the productization plan — turning this pipeline into LunaVisionAI as a commercial multi-tenant SaaS (architecture, orchestration, billing, roadmap) — see [`SAAS_ARCHITECTURE_PLAN.md`](./SAAS_ARCHITECTURE_PLAN.md).
 
 ---
 
