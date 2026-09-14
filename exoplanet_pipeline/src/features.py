@@ -253,14 +253,28 @@ def extract_geometry_features(tls_results: dict, baseline: float) -> dict:
 
     r             = tls_results
     period        = float(r.period)
-    depth         = float(r.depth)
+    # NOTE: transitleastsquares' results.depth is the flux LEVEL at the
+    # transit bottom (≈1 for a shallow transit), not the fractional dip —
+    # confirmed against the library's own source (main.py: `fractional_transit(
+    # ..., depth=1-depth, ...)` and `rp_rs_from_depth(depth=1-depth, ...)`
+    # both convert it before using it as an actual depth). Using r.depth
+    # directly here produced depth_ppm values of ~990,000-999,900 for every
+    # candidate regardless of the true transit depth — verified against
+    # synthetic injections with known depths of a few hundred to ~17,000 ppm.
+    depth         = 1.0 - float(r.depth)
     duration_hr   = float(r.duration) * 24.0
     transit_count = int(r.transit_count) if hasattr(r, "transit_count") else int(baseline / period)
     SDE           = float(r.SDE)
     SNR           = float(r.snr)  if hasattr(r, "snr")  else np.nan
     FAP           = float(r.FAP)  if hasattr(r, "FAP")  else np.nan
     t0            = float(r.T0)   if hasattr(r, "T0")   else np.nan
-    rp_rs         = float(np.sqrt(depth)) if depth > 0 else np.nan
+    # TLS already computes rp_rs correctly from the corrected depth internally
+    # (via rp_rs_from_depth) — use it directly rather than re-deriving from
+    # our own (previously wrong) depth value.
+    if hasattr(r, "rp_rs") and np.isfinite(r.rp_rs):
+        rp_rs = float(r.rp_rs)
+    else:
+        rp_rs = float(np.sqrt(depth)) if depth > 0 else np.nan
     phase_cov     = float(r.duty_cycle) if hasattr(r, "duty_cycle") \
                     else (duration_hr / 24.0) / period
 
@@ -400,7 +414,23 @@ def extract_features_one(npz_path: Path, label: int = -1) -> dict:
             "secondary_ratio": np.nan, "odd_depth": np.nan,
             "even_depth": np.nan, "odd_even_ratio": np.nan,
         }
-        tsf_feat   = {}
+        # NaN-fill every tsf_* key gpu_fft_features() would otherwise produce
+        # (rather than leaving this dict empty). Every row extracted in a
+        # batch must carry the exact same set of keys: extract_features_batch
+        # builds each checkpoint's CSV chunk independently via
+        # pd.DataFrame(batch_rows), and a chunk with a narrower column set
+        # than the file's existing header gets silently misaligned when
+        # appended with header=False — confirmed in practice, this was
+        # corrupting feature_matrix.csv (columns to the right of "period"
+        # drifting into the wrong header) whenever a batch mixed rows that
+        # found a period with rows that didn't.
+        tsf_feat = {
+            "tsf_mean": np.nan, "tsf_variance": np.nan, "tsf_abs_energy": np.nan,
+            "tsf_mean_abs_change": np.nan, "tsf_maximum": np.nan,
+            "tsf_minimum": np.nan, "tsf_median": np.nan,
+            **{f"tsf_fft_coeff_{i}_real": np.nan for i in range(10)},
+            **{f"tsf_fft_coeff_{i}_abs": np.nan for i in range(10)},
+        }
         phase_arr  = None
         binned     = None
 
@@ -554,9 +584,10 @@ def extract_features_batch(
         pbar     = None
         use_pbar = False
 
-    write_header = not (resume and output_path.exists())
-    n_done       = 0
-    batch_rows   = []
+    write_header       = not (resume and output_path.exists())
+    n_done             = 0
+    batch_rows         = []
+    canonical_columns  = None  # locked to the first checkpoint's column set
 
     gen = Parallel(n_jobs=n_jobs, verbose=0, return_as="generator")(
         delayed(_worker)(f) for f in pending
@@ -570,7 +601,22 @@ def extract_features_batch(
         if len(batch_rows) >= checkpoint_n or n_done == len(pending):
             _check_ram()   # pause if RAM is critically low
             batch_df = pd.DataFrame(batch_rows)
-            batch_df.to_csv(output_path, mode="a", header=write_header, index=False)
+            # Defense in depth: every checkpoint must share one column set.
+            # A batch missing/adding columns (e.g. a future feature-category
+            # bug mirroring the tsf_* one fixed above) would otherwise get
+            # silently misaligned by to_csv(header=False) instead of erroring.
+            if canonical_columns is None:
+                canonical_columns = batch_df.columns.tolist()
+            else:
+                batch_df = batch_df.reindex(columns=canonical_columns)
+            # write_header is only True for the very first checkpoint of a
+            # fresh (non-resumed) run — use "w" for that one to truncate any
+            # stale content, "a" for every checkpoint after. Using "a"
+            # unconditionally here used to mean `--no-resume` re-extractions
+            # got appended onto the old file instead of replacing it,
+            # silently duplicating/corrupting feature_matrix.csv.
+            mode = "w" if write_header else "a"
+            batch_df.to_csv(output_path, mode=mode, header=write_header, index=False)
             write_header = False
             batch_rows   = []
             log.info("  Checkpoint: %d / %d saved  |  RAM free: %.1f GB  |  GPU VRAM: %.2f GB",

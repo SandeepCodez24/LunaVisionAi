@@ -874,34 +874,68 @@ def inject_synthetic_transits(
         # Normalise host flux
         flux = flux / np.nanmedian(flux)
 
-        # ── Sample transit parameters ────────────────────────────────────────
-        period = float(rng.uniform(1.0, 30.0))           # days
-        rp     = float(rng.uniform(0.01, 0.15))          # Rp/R*
-        a      = float(rng.uniform(5.0, 50.0))           # a/R*
-        inc    = float(rng.uniform(85.0, 90.0))          # degrees
-        t0     = float(rng.uniform(time[0], time[0] + period))
+        # ── Sample transit parameters — rejection-sampled for a REAL transit ──
+        # Sampling `a` (a/R*) and `inc` independently and uniformly, as before,
+        # frequently produces a non-transiting geometry: the impact parameter
+        # b = a*cos(inc) exceeds 1+rp, so the planet's projected path never
+        # crosses the stellar disk and batman returns a flat light curve
+        # (lc_model == 1 everywhere). The old code didn't check for this, so
+        # a meaningful fraction of "synthetic transit" injections were just
+        # unmodified copies of the host's own flux, mislabeled as label=0
+        # Transit with fabricated period/depth metadata — confirmed in
+        # practice (byte-identical flux arrays for two different claimed
+        # injections that both happened to land on non-transiting geometry).
+        # Fix: keep resampling the full parameter set until batman's actual
+        # output shows a real, detectable dip, verified from the model
+        # itself rather than trusting the geometry analytically (this also
+        # naturally accounts for limb darkening reducing the effective depth
+        # near the grazing threshold).
+        MAX_GEOM_ATTEMPTS = 20
+        MIN_DEPTH_FRAC    = 0.3     # actual dip must be >= 30% of the naive rp^2 estimate
+        MIN_DEPTH_ABS     = 3e-5    # and at least 30 ppm — above the noise floor
 
-        # ── Build batman model ───────────────────────────────────────────────
-        params = batman.TransitParams()
-        params.t0          = t0
-        params.per         = period
-        params.rp          = rp
-        params.a           = a
-        params.inc         = inc
-        params.ecc         = 0.0
-        params.w           = 90.0
-        params.u           = [0.3, 0.1]
-        params.limb_dark   = "quadratic"
+        period = rp = a = inc = t0 = None
+        lc_model = None
+        for _attempt in range(MAX_GEOM_ATTEMPTS):
+            period = float(rng.uniform(1.0, 30.0))           # days
+            rp     = float(rng.uniform(0.01, 0.15))          # Rp/R*
+            a      = float(rng.uniform(5.0, 50.0))           # a/R*
+            inc    = float(rng.uniform(85.0, 90.0))          # degrees
+            t0     = float(rng.uniform(time[0], time[0] + period))
 
-        try:
-            m          = batman.TransitModel(params, time)
-            lc_model   = m.light_curve(params)
-            flux_inj   = flux * lc_model
-        except Exception as e:
-            log.debug("  Injection %d failed (batman error): %s", i, e)
+            params = batman.TransitParams()
+            params.t0          = t0
+            params.per         = period
+            params.rp          = rp
+            params.a           = a
+            params.inc         = inc
+            params.ecc         = 0.0
+            params.w           = 90.0
+            params.u           = [0.3, 0.1]
+            params.limb_dark   = "quadratic"
+
+            try:
+                m = batman.TransitModel(params, time)
+                candidate_model = m.light_curve(params)
+            except Exception as e:
+                log.debug("  Injection %d attempt %d failed (batman error): %s", i, _attempt, e)
+                continue
+
+            actual_depth = 1.0 - float(np.min(candidate_model))
+            expected_depth = rp ** 2
+            if actual_depth >= max(MIN_DEPTH_FRAC * expected_depth, MIN_DEPTH_ABS):
+                lc_model = candidate_model
+                break
+
+        if lc_model is None:
+            log.debug("  Injection %d: no transiting geometry found after %d attempts — skipping.",
+                      i, MAX_GEOM_ATTEMPTS)
             continue
 
-        depth_ppm = (rp ** 2) * 1e6
+        flux_inj  = flux * lc_model
+        # Measured from the actual model output (accounts for limb darkening
+        # and grazing geometry) rather than the naive rp^2 estimate.
+        depth_ppm = (1.0 - float(np.min(lc_model))) * 1e6
 
         # ── Save injected light curve ────────────────────────────────────────
         syn_id    = f"SYN_{i:04d}"

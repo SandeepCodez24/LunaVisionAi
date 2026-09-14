@@ -1,0 +1,48 @@
+tic_id,status,reason,out_path,n_cadences,baseline_days,rms_raw,rms_detrended
+TIC_144065872,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_144065872.npz,,,,
+TIC_149603524,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_149603524.npz,,,,
+TIC_201248411,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_201248411.npz,,,,
+TIC_207081058,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_207081058.npz,,,,
+TIC_231663901,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_231663901.npz,,,,
+TIC_231670397,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_231670397.npz,,,,
+TIC_231702397,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_231702397.npz,,,,
+TIC_25155310,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_25155310.npz,,,,
+TIC_263003176,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_263003176.npz,,,,
+TIC_266980320,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_266980320.npz,,,,
+TIC_278683844,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_278683844.npz,,,,
+TIC_281459670,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_281459670.npz,,,,
+TIC_281541555,gated,rms 0.0090 > 5.0× expected 0.0014,,,,,
+TIC_289793076,gated,rms 0.0087 > 5.0× expected 0.0014,,,,,
+TIC_290131778,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_290131778.npz,,,,
+TIC_29344935,gated,rms 0.0078 > 5.0× expected 0.0014,,,,,
+TIC_29831208,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_29831208.npz,,,,
+TIC_336732616,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_336732616.npz,,,,
+TIC_355703913,gated,rms 0.0070 > 5.0× expected 0.0014,,,,,
+TIC_388104525,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_388104525.npz,,,,
+TIC_38846515,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_38846515.npz,,,,
+TIC_391949880,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_391949880.npz,,,,
+TIC_394137592,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_394137592.npz,,,,
+TIC_52368076,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_52368076.npz,,,,
+TIC_70440470,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_70440470.npz,,,,
+TIC_92352620,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_92352620.npz,,,,
+TIC_97409519,skipped,already exists,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/TIC_97409519.npz,,,,
+SYN_0000,done,ok,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/SYN_0000.npz,17127.0,27.881,0.003174,0.000863
+SYN_0001,done,ok,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/SYN_0001.npz,18148.0,27.88,0.001039,0.000412
+SYN_0002,done,ok,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/SYN_0002.npz,17670.0,27.88,0.005144,0.003944
+SYN_0003,done,ok,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/SYN_0003.npz,18209.0,27.881,0.001804,0.001763
+SYN_0004,done,ok,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/SYN_0004.npz,17426.0,27.881,0.000687,0.000264
+SYN_0005,done,ok,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/SYN_0005.npz,17010.0,27.691,0.00445,0.003579
+SYN_0006,gated,rms 0.0079 > 5.0× expected 0.0014,,,,,
+SYN_0007,gated,rms 0.0087 > 5.0× expected 0.0014,,,,,
+SYN_0008,done,ok,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/SYN_0008.npz,17781.0,27.881,0.002964,0.001314
+SYN_0009,done,ok,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/SYN_0009.npz,17570.0,27.88,0.00123,0.000988
+SYN_0010,done,ok,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/SYN_0010.npz,17095.0,27.881,0.00255,0.000784
+SYN_0011,gated,rms 0.0087 > 5.0× expected 0.0014,,,,,
+SYN_0012,done,ok,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/SYN_0012.npz,17439.0,27.88,0.002078,0.000963
+SYN_0013,done,ok,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/SYN_0013.npz,17293.0,27.881,0.001967,0.000262
+SYN_0014,gated,rms 0.0090 > 5.0× expected 0.0014,,,,,
+SYN_0015,done,ok,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/SYN_0015.npz,18126.0,27.881,0.000863,0.000699
+SYN_0016,done,ok,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/SYN_0016.npz,17541.0,27.743,0.002971,0.002315
+SYN_0017,done,ok,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/SYN_0017.npz,17933.0,27.881,0.001482,0.000701
+SYN_0018,done,ok,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/SYN_0018.npz,17406.0,27.881,0.002477,0.000861
+SYN_0019,done,ok,/Users/sandeep/Workspace/Personal/LunaVisionAi/exoplanet_pipeline/data/processed/lc_detrended/SYN_0019.npz,15077.0,26.102,0.001889,0.001156
