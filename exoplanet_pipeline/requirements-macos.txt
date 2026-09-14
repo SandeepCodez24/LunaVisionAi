@@ -1,0 +1,40 @@
+# macOS / CPU-only development & testing environment
+# ──────────────────────────────────────────────────────────────────────────
+# requirements.txt (in this same directory) targets the Windows + RTX 4050
+# GPU machine (CuPy/CUDA torch) this project was originally built on — do
+# not edit that file for Mac use.
+#
+# This file installs the same pipeline on a plain CPU (e.g. Apple Silicon
+# Mac) for local testing/verification and real data collection. Every GPU
+# code path in src/gpu_features.py already falls back to NumPy/SciPy when
+# CuPy/CUDA-torch aren't available, so nothing here needs a GPU-specific
+# substitute — it just runs the CPU fallback path everywhere.
+#
+# Install with:
+#   python3 -m venv exoplanet_pipeline/.venv
+#   exoplanet_pipeline/.venv/bin/pip install -r exoplanet_pipeline/requirements-macos.txt
+# ──────────────────────────────────────────────────────────────────────────
+
+# Core astronomy / signal processing
+numpy
+scipy
+pandas
+astropy
+lightkurve
+transitleastsquares
+
+# Detrending
+wotan
+
+# Transit modeling (parameter fitting, synthetic injection)
+batman-package
+
+# ML / pipeline utilities
+scikit-learn
+matplotlib
+joblib
+psutil
+tqdm
+
+# MAST / catalog access
+astroquery

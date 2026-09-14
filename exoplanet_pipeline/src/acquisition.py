@@ -53,9 +53,11 @@ CATALOGS_DIR   = BASE_DIR / "data" / "catalogs"
 for d in [RAW_DIR, PROCESSED_DIR, CATALOGS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
-# Known raw-file names (already downloaded by the user)
+# Known raw-file names. Both are auto-downloaded (see download_exofop_toi_csv
+# / download_nasa_confirmed_csv below) if not already present locally — the
+# NASA file's name carries a download timestamp, so it's located by glob
+# inside parse_nasa_confirmed() rather than pinned to a fixed path here.
 TOI_CSV         = RAW_DIR / "tois_list.csv"           # ExoFOP full TOI table
-PS_CSV          = next(RAW_DIR.glob("PS_*.csv"), None) # NASA confirmed planets
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LABEL MAP  (Step 3.3)
@@ -114,12 +116,100 @@ def _retry_call(fn, *args, max_retries: int = 3, base_delay: float = 2.0,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ROBUST CSV READER — external catalog exports occasionally trip pandas'
+# C-engine tokenizer (observed in practice on the real ExoFOP TOI export,
+# which has many long, quoted, comma-separated fields like "Sectors" —
+# a known edge case for the C engine's chunk-size heuristics). Retry with
+# the slower but more tolerant pure-Python engine rather than failing the
+# whole acquisition run over one flaky catalog file.
+# ─────────────────────────────────────────────────────────────────────────────
+def _read_csv_robust(path, **kwargs) -> pd.DataFrame:
+    try:
+        return pd.read_csv(path, **kwargs)
+    except pd.errors.ParserError as e:
+        log.warning("  C-engine CSV parse failed for %s (%s) — retrying with the Python engine.",
+                    path, e)
+        kwargs.pop("engine", None)
+        return pd.read_csv(path, engine="python", **kwargs)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AUTO-DOWNLOAD FOR REFERENCE CATALOGS — makes Step 3.2a/b self-bootstrapping
+# instead of requiring a manually-exported CSV to already exist under
+# data/raw/. Both sources are public, unauthenticated HTTP endpoints.
+# ─────────────────────────────────────────────────────────────────────────────
+EXOFOP_TOI_URL = "https://exofop.ipac.caltech.edu/tess/download_toi.php?sort=toi&output=csv"
+NASA_TAP_URL   = "https://exoplanetarchive.ipac.caltech.edu/TAP/sync"
+NASA_PS_QUERY  = (
+    "select pl_name,hostname,tic_id,pl_orbper,pl_trandep,pl_trandur,"
+    "st_teff,st_logg,st_rad,st_mass,discoverymethod,disc_facility,default_flag "
+    "from ps where default_flag=1"
+)
+
+
+def download_exofop_toi_csv(output_path: Path = None, timeout: int = 120) -> Path:
+    """
+    Download the full, current ExoFOP-TESS TOI table directly from ExoFOP.
+    The server takes ~20-30s to generate the export before it starts
+    streaming (confirmed empirically), so the read timeout here is generous.
+    """
+    import requests
+
+    if output_path is None:
+        output_path = TOI_CSV
+
+    def _fetch():
+        resp = requests.get(EXOFOP_TOI_URL, timeout=(10, timeout))
+        resp.raise_for_status()
+        return resp.content
+
+    log.info("Downloading current ExoFOP-TESS TOI table (~20-30s, please wait)…")
+    content = _retry_call(_fetch, max_retries=3, base_delay=5.0, what="ExoFOP TOI download")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(content)
+    log.info("  Saved → %s (%.2f MB)", output_path, len(content) / 1e6)
+    return output_path
+
+
+def download_nasa_confirmed_csv(output_path: Path = None, timeout: int = 60) -> Path:
+    """
+    Query the NASA Exoplanet Archive TAP service directly for confirmed
+    planets (default parameter set only), instead of requiring a manually
+    exported PS_*.csv from the archive's web UI.
+    """
+    import requests
+    import datetime
+
+    if output_path is None:
+        stamp = datetime.datetime.utcnow().strftime("%Y.%m.%d_%H.%M.%S")
+        output_path = RAW_DIR / f"PS_{stamp}.csv"
+
+    def _fetch():
+        resp = requests.get(
+            NASA_TAP_URL, params={"query": NASA_PS_QUERY, "format": "csv"},
+            timeout=(10, timeout),
+        )
+        resp.raise_for_status()
+        return resp.content
+
+    log.info("Querying NASA Exoplanet Archive (TAP) for confirmed planets…")
+    content = _retry_call(_fetch, max_retries=3, base_delay=5.0, what="NASA Exoplanet Archive TAP query")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(content)
+    log.info("  Saved → %s (%d rows)", output_path, max(content.count(b"\n") - 1, 0))
+    return output_path
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # STEP 3.2a + 3.3  – Parse ExoFOP TOI catalog
 # ─────────────────────────────────────────────────────────────────────────────
 def parse_exofop_toi() -> pd.DataFrame:
     """
     Load the ExoFOP-TESS TOI list (tois_list.csv), clean it, and assign
-    a unified integer class label using LABEL_MAP.
+    a unified integer class label using LABEL_MAP. Downloads a fresh copy
+    from ExoFOP automatically if no local copy exists yet.
 
     Returns
     -------
@@ -128,8 +218,13 @@ def parse_exofop_toi() -> pd.DataFrame:
         stellar_Teff, stellar_logg, stellar_rad, stellar_mass,
         tess_mag, tfop_disposition, label
     """
-    log.info("Parsing ExoFOP TOI catalog: %s", TOI_CSV)
-    df = pd.read_csv(TOI_CSV, dtype={"TIC ID": str})
+    toi_csv = TOI_CSV
+    if not toi_csv.exists():
+        log.info("  %s not found locally — fetching a fresh copy from ExoFOP.", toi_csv.name)
+        toi_csv = download_exofop_toi_csv(toi_csv)
+
+    log.info("Parsing ExoFOP TOI catalog: %s", toi_csv)
+    df = _read_csv_robust(toi_csv, dtype={"TIC ID": str})
 
     # Standardise column names to snake_case
     df.columns = [c.strip() for c in df.columns]
@@ -182,18 +277,22 @@ def parse_nasa_confirmed() -> pd.DataFrame:
     """
     Load the NASA Exoplanet Archive confirmed-planets CSV (PS_*.csv),
     filter to TESS-discovered planets, and label all as class 0 (Transit).
+    Queries the NASA TAP service automatically if no local copy exists yet
+    (re-globbed here rather than using the module-level PS_CSV constant, so
+    a freshly downloaded file is picked up within the same process).
 
     Returns
     -------
     pd.DataFrame with columns: pl_name, hostname, tic_id, period, depth_ppm,
         duration_hr, stellar_Teff, stellar_logg, stellar_rad, label
     """
-    if PS_CSV is None:
-        log.warning("NASA PS CSV not found in %s – skipping.", RAW_DIR)
-        return pd.DataFrame()
+    ps_csv = next(RAW_DIR.glob("PS_*.csv"), None)
+    if ps_csv is None:
+        log.info("  No local NASA PS_*.csv found — querying the NASA Exoplanet Archive TAP service.")
+        ps_csv = download_nasa_confirmed_csv()
 
-    log.info("Parsing NASA Exoplanet Archive: %s", PS_CSV.name)
-    df = pd.read_csv(PS_CSV, comment="#", dtype=str)
+    log.info("Parsing NASA Exoplanet Archive: %s", ps_csv.name)
+    df = _read_csv_robust(ps_csv, comment="#", dtype=str)
     df.columns = [c.strip() for c in df.columns]
 
     rename = {
@@ -211,6 +310,15 @@ def parse_nasa_confirmed() -> pd.DataFrame:
         "disc_facility": "facility",
     }
     df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
+
+    # The NASA TAP API returns tic_id as "TIC 123456789"; every other catalog
+    # in this pipeline (TOI, TIC crossmatch, download manifest) uses the bare
+    # numeric string, so normalise it here to keep tic_id joins working.
+    if "tic_id" in df.columns:
+        df["tic_id"] = (
+            df["tic_id"].astype(str).str.replace("TIC ", "", regex=False).str.strip()
+        )
+        df.loc[df["tic_id"].isin(["", "nan", "None"]), "tic_id"] = np.nan
 
     # Keep only default parameter rows if column exists
     if "default_flag" in df.columns:
@@ -243,8 +351,14 @@ def download_tce_catalog(sector: int = 1, max_records: int = 500) -> pd.DataFram
     Query the MAST TESS DV (Data Validation) catalog for Threshold Crossing
     Events (TCEs) in a given sector.  Results are saved to data/catalogs/.
 
-    This uses astroquery's Mast service, which exposes the DV results table
-    (equivalent to the SPOC dvt.fits catalog).
+    Goes straight to the Observations/product-download API. An earlier
+    version of this function tried astroquery's newer MastMissions search
+    service first — confirmed against the live API that it does not support
+    "tess" as a mission (`mission="tess"` errors as an invalid filter, and
+    even instantiating MastMissions(mission="tess") gets a 500 from MAST's
+    own column_list endpoint) — so that path could never succeed and only
+    wasted a retry cycle on every call. Removed rather than left as dead
+    weight in front of the path that actually works.
 
     Parameters
     ----------
@@ -257,27 +371,7 @@ def download_tce_catalog(sector: int = 1, max_records: int = 500) -> pd.DataFram
         tic_id, toi_id, sector, period, epoch, depth_ppm, duration_hr, label
     """
     log.info("Querying MAST for SPOC TCE catalog — Sector %d …", sector)
-    try:
-        from astroquery.mast import Catalogs, Observations
-        from astroquery.mast import MastMissions
-
-        # Query TESS SPOC DV summary table for this sector
-        # The table name on MAST is 'tess_dv_summary'
-        results = _retry_call(
-            MastMissions.query_criteria,
-            mission="tess",
-            select_cols=["tic_id", "tce_plnt_num", "tce_period", "tce_time0bk",
-                         "tce_depth", "tce_duration", "tce_dikco_msky",
-                         "tce_model_snr", "tce_sde"],
-            sector_number=sector,
-            limit=max_records,
-            what=f"TCE catalog query (sector {sector})",
-        )
-        tce_df = results.to_pandas() if hasattr(results, "to_pandas") else pd.DataFrame(results)
-
-    except Exception as e:
-        log.warning("MastMissions query failed (%s). Falling back to Observations API.", e)
-        tce_df = _download_tce_via_observations(sector, max_records)
+    tce_df = _download_tce_via_observations(sector, max_records)
 
     if tce_df is None or len(tce_df) == 0:
         log.warning("No TCE records retrieved for sector %d.", sector)
@@ -428,10 +522,12 @@ def crossmatch_tic(tic_ids: list, batch_size: int = 100) -> pd.DataFrame:
     for start in range(0, len(tic_ids), batch_size):
         batch = tic_ids[start : start + batch_size]
         try:
-            # Build a comma-separated ID list query string
-            id_list = ",".join(batch)
+            # NOTE: MAST's TIC filter wants ID as an actual list — a
+            # comma-joined string makes the server try to cast the whole
+            # string to bigint and fail ("Error converting data type
+            # varchar to bigint."). Confirmed against the live MAST API.
             result = _retry_call(
-                Catalogs.query_criteria, catalog="TIC", ID=id_list,
+                Catalogs.query_criteria, catalog="TIC", ID=batch,
                 what=f"TIC batch crossmatch ({len(batch)} IDs)",
             )
             if result is not None and len(result) > 0:
@@ -506,9 +602,15 @@ def _download_one_light_curve(
     """
     Download + quality-filter a single target's light curve.
 
-    Designed to be safe to call from multiple threads concurrently: all
-    module-level state it touches (BAD_QUALITY_BITS) is read-only, and each
-    target reads/writes only its own file, so no locking is needed.
+    Each target reads/writes only its own output file, so no locking is
+    needed there. lightkurve/astropy's *download* machinery, however, turned
+    out NOT to be fully thread-safe when many downloads start at the exact
+    same instant — confirmed empirically: a concurrency=8 batch produced
+    repeated "I/O operation on closed file" errors from several threads
+    hitting search/download simultaneously (astropy's shared download-cache
+    locking is the likely cause). download_light_curves() mitigates this by
+    staggering submission start times; _retry_call adds a second layer of
+    defense for whatever races still slip through.
 
     Returns
     -------
@@ -632,11 +734,21 @@ def download_light_curves(
     stats = {"downloaded": 0, "skipped": 0, "failed": 0}
     n_total = len(tic_ids)
 
+    # Stagger submission starts slightly. Confirmed empirically: submitting
+    # a full batch of `concurrency` downloads at the exact same instant
+    # triggers a thread-safety race in lightkurve/astropy's shared download
+    # cache ("I/O operation on closed file"). A small delay between
+    # submissions is enough to avoid that first-wave collision without
+    # meaningfully hurting throughput (each download itself takes seconds).
+    STAGGER_START_SEC = 0.15
+
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
-        futures = {
-            pool.submit(_download_one_light_curve, tic_id, sector, output_dir, max_retries): tic_id
-            for tic_id in tic_ids
-        }
+        futures = {}
+        for i, tic_id in enumerate(tic_ids):
+            futures[pool.submit(_download_one_light_curve, tic_id, sector, output_dir, max_retries)] = tic_id
+            if i < len(tic_ids) - 1:
+                time.sleep(STAGGER_START_SEC)
+
         for i, fut in enumerate(as_completed(futures), start=1):
             res = fut.result()
             status = res["status"]
