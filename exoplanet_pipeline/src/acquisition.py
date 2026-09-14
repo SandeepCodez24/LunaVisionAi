@@ -593,6 +593,35 @@ def crossmatch_tic(tic_ids: list, batch_size: int = 100) -> pd.DataFrame:
 BAD_QUALITY_BITS = 1 | 2 | 4 | 8 | 16 | 512
 
 
+def _clear_lightkurve_cache_for_tic(tic_id: str) -> None:
+    """
+    Remove any cached download for this TIC ID from lightkurve's on-disk
+    cache (mastDownload/TESS/*-<16-digit zero-padded TIC ID>-*/).
+
+    Confirmed empirically: lightkurve/astropy's download layer is not fully
+    thread-safe under concurrent downloads — a torn write from a threading
+    race can leave a truncated, corrupt FITS file behind (observed: a
+    65536-byte file where a real 2-min TESS light curve is hundreds of KB+).
+    lightkurve trusts its cache by default, so every subsequent attempt
+    (including retries within the same call, and even fresh runs days
+    later) then fails immediately trying to parse that same corrupt file
+    instead of ever re-downloading. Calling this before every attempt turns
+    each retry back into a genuine fresh download.
+    """
+    import shutil
+    try:
+        import lightkurve as lk
+        cache_root = Path(lk.config.get_cache_dir()) / "mastDownload" / "TESS"
+        if not cache_root.exists():
+            return
+        padded = str(tic_id).zfill(16)
+        for d in cache_root.glob(f"*-{padded}-*"):
+            if d.is_dir():
+                shutil.rmtree(d, ignore_errors=True)
+    except Exception:
+        pass  # best-effort cleanup only — never let this fail the download
+
+
 def _download_one_light_curve(
     tic_id: str,
     sector: Optional[int],
@@ -625,6 +654,12 @@ def _download_one_light_curve(
         return {"tic_id": tic_id, "status": "skipped", "path": str(npz_path)}
 
     def _fetch():
+        # Clear any stale/corrupt cache entry for this target before every
+        # attempt (see _clear_lightkurve_cache_for_tic docstring for why:
+        # a torn write leaves a truncated FITS file that every subsequent
+        # attempt — including retries — would otherwise keep re-failing on
+        # without ever re-downloading).
+        _clear_lightkurve_cache_for_tic(tic_id)
         query_str = f"TIC {tic_id}"
         search_kwargs = dict(author="SPOC", cadence="2min")
         if sector is not None:
