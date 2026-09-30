@@ -8,6 +8,28 @@
 
 ---
 
+## ✅ Implementation Status & Deviations from Spec (updated 2026-09-19)
+
+**Built**: Stage 1–2 (acquisition, preprocessing), Stage 3 (`detection.py`), Stage 4 (`features.py` + `gpu_features.py`). **Not yet built**: Stage 5 (`classifier.py`), Stage 6 / fitting (`fitting.py`), `visualization.py`, `report.py`, agent layer, `run_pipeline.py`, Streamlit app. Data on hand: 2,120 usable real light curves (1,423 planet-side / 697 non-planet) + 192 synthetic injections; feature matrix regeneration on the full set pending.
+
+Deliberate deviations from the spec text below, each found by testing against real MAST data:
+
+| Spec | Implemented | Why |
+|---|---|---|
+| Sigma-clip (implicit, both tails) | **Upper-only** clip | A symmetric clip on un-detrended flux removes the transit itself |
+| TLS `minimum_period` / `maximum_period` | `period_min` / `period_max` | The former are not TLS parameters and were silently ignored |
+| TLS `oversampling_factor=5` | 3 | Speed/accuracy trade-off on a laptop; revisit for the production run |
+| SDE threshold 7 in feature extraction | 5 for feature extraction, **7 + FAP<0.01 for candidates** (`detect_candidate`) | Keep borderline signals as classifier inputs |
+| Use `results.depth` as transit depth | `1 - results.depth`; prefer `results.rp_rs` | TLS returns the flux level at the transit bottom |
+| Quality gate: rms > 5× expected photon noise | Robust (MAD) scatter > 2% | The proxy depended only on cadence count and rejected all faint stars, biased against the planet class |
+| Synthetic injections: uniform random parameters | Rejection-sampled: real dip verified via batman, ≥3 transits in baseline, SNR ≥ 8, label-3 hosts | Otherwise many "transits" were flat or unrecoverable |
+| Sector-wise download | Label-driven download (`--labeled-targets`, ≤2 sectors/target) | Labeled targets are what training needs; most of a sector is unlabeled |
+| Acceptance §11: BLS/TLS recovers ≥80% of known TOIs at SDE ≥ 7 | Interim: 6/8 synthetic injections recovered within 5% (partial); real-TOI recovery not yet measured | Full inject-recover and TOI-recovery validation pending |
+
+Full progress log, bug table and next steps: see [`SAAS_ARCHITECTURE_PLAN.md`](./SAAS_ARCHITECTURE_PLAN.md) Appendix A and §14.
+
+---
+
 ## 📋 Table of Contents
 
 1. [Project Overview](#1-project-overview)

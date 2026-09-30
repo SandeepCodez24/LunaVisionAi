@@ -574,7 +574,9 @@ def crossmatch_tic(tic_ids: list, batch_size: int = 100) -> pd.DataFrame:
     out = CATALOGS_DIR / "tic_stellar_params.csv"
     if out.exists():
         try:
-            existing = pd.read_csv(out, dtype={"tic_id": str})
+            existing = pd.read_csv(out, skipinitialspace=True)
+            existing.columns = existing.columns.str.strip()
+            existing["tic_id"] = existing["tic_id"].astype(str).str.strip()
             tic_df = pd.concat([existing, tic_df], ignore_index=True)
             tic_df = tic_df.drop_duplicates(subset=["tic_id"], keep="last")
         except Exception as e:
@@ -627,6 +629,7 @@ def _download_one_light_curve(
     sector: Optional[int],
     output_dir: Path,
     max_retries: int = 3,
+    max_sectors: Optional[int] = None,
 ) -> dict:
     """
     Download + quality-filter a single target's light curve.
@@ -649,9 +652,18 @@ def _download_one_light_curve(
 
     npz_path = output_dir / f"TIC_{tic_id}.npz"
 
-    # ── Resume: skip if already downloaded ──────────────────────────────────
+    # ── Resume: skip only if already downloaded AND has centroid columns ────
+    # Files from before the centroid-vetting feature (mom_centr1/2) was added
+    # lack those keys — re-fetch those specifically so a single re-run both
+    # backfills centroid data onto existing targets and extends coverage to
+    # new ones, instead of two separate passes.
     if npz_path.exists():
-        return {"tic_id": tic_id, "status": "skipped", "path": str(npz_path)}
+        try:
+            with np.load(npz_path) as d:
+                if "mom_centr1" in d:
+                    return {"tic_id": tic_id, "status": "skipped", "path": str(npz_path)}
+        except Exception:
+            pass   # corrupt/truncated file — fall through and re-fetch
 
     def _fetch():
         # Clear any stale/corrupt cache entry for this target before every
@@ -667,6 +679,8 @@ def _download_one_light_curve(
         sr = lk.search_lightcurve(query_str, **search_kwargs)
         if len(sr) == 0:
             return None
+        if max_sectors:
+            sr = sr[:max_sectors]    # cap per-target FITS volume (disk/time)
         return sr.download_all(quality_bitmask="none")   # we apply our own mask
 
     try:
@@ -690,6 +704,24 @@ def _download_one_light_curve(
         pdcsap_flux = lc["pdcsap_flux"].value.astype(np.float64)
         quality     = lc["quality"].value.astype(np.int32)
 
+        # Flux-weighted centroid position (row/col, CCD pixels) plus the
+        # spacecraft-pointing correction already applied to it — both ship
+        # in every SPOC light curve FITS, no separate Target Pixel File
+        # download needed. This is what features.py's centroid_proxy uses
+        # to catch background-blend false positives (a transit-correlated
+        # centroid shift means the dip isn't on the target star): the one
+        # feature category the pipeline previously had no data for at all.
+        n = len(lc)
+        def _col(name):
+            try:
+                return lc[name].value.astype(np.float64)
+            except Exception:
+                return np.full(n, np.nan)
+        mom_centr1 = _col("mom_centr1")
+        mom_centr2 = _col("mom_centr2")
+        pos_corr1  = _col("pos_corr1")
+        pos_corr2  = _col("pos_corr2")
+
         np.savez_compressed(
             npz_path,
             tic_id      = tic_id,
@@ -697,8 +729,13 @@ def _download_one_light_curve(
             sap_flux    = sap_flux,
             pdcsap_flux = pdcsap_flux,
             quality     = quality,
+            mom_centr1  = mom_centr1,
+            mom_centr2  = mom_centr2,
+            pos_corr1   = pos_corr1,
+            pos_corr2   = pos_corr2,
             sector      = sector if sector else -1,
         )
+        _clear_lightkurve_cache_for_tic(tic_id)   # npz is the source of truth; free cache
         return {"tic_id": tic_id, "status": "downloaded", "path": str(npz_path)}
 
     except Exception as e:
@@ -712,6 +749,7 @@ def download_light_curves(
     max_targets: int = None,
     concurrency: int = 8,
     max_retries: int = 3,
+    max_sectors: Optional[int] = None,
 ) -> dict:
     """
     Download SPOC 2-minute cadence TESS light curves for a list of TIC IDs,
@@ -780,7 +818,7 @@ def download_light_curves(
     with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
         futures = {}
         for i, tic_id in enumerate(tic_ids):
-            futures[pool.submit(_download_one_light_curve, tic_id, sector, output_dir, max_retries)] = tic_id
+            futures[pool.submit(_download_one_light_curve, tic_id, sector, output_dir, max_retries, max_sectors)] = tic_id
             if i < len(tic_ids) - 1:
                 time.sleep(STAGGER_START_SEC)
 
@@ -893,11 +931,25 @@ def inject_synthetic_transits(
         MAX_GEOM_ATTEMPTS = 20
         MIN_DEPTH_FRAC    = 0.3     # actual dip must be >= 30% of the naive rp^2 estimate
         MIN_DEPTH_ABS     = 3e-5    # and at least 30 ppm — above the noise floor
+        # Detectability: an injection that a perfect detector could not find
+        # (fewer than MIN_TRANSITS transits inside the baseline, or expected
+        # SNR below MIN_SNR) is a mislabeled positive — it just teaches the
+        # classifier that noise is a transit. Previously periods up to 30 d
+        # were drawn on ~27 d light curves (a single transit, unrecoverable
+        # by any periodogram) and shallow dips were buried in the host noise.
+        MIN_TRANSITS = 3
+        MIN_SNR      = 8.0
+        baseline = float(time[-1] - time[0])
+        p_max    = min(30.0, baseline / MIN_TRANSITS)
+        if p_max <= 1.0:
+            continue
+        # robust point-to-point scatter of the host (transits/trends excluded)
+        sigma = 1.4826 * float(np.median(np.abs(np.diff(flux) - np.median(np.diff(flux))))) / np.sqrt(2)
 
         period = rp = a = inc = t0 = None
         lc_model = None
         for _attempt in range(MAX_GEOM_ATTEMPTS):
-            period = float(rng.uniform(1.0, 30.0))           # days
+            period = float(rng.uniform(1.0, p_max))          # days
             rp     = float(rng.uniform(0.01, 0.15))          # Rp/R*
             a      = float(rng.uniform(5.0, 50.0))           # a/R*
             inc    = float(rng.uniform(85.0, 90.0))          # degrees
@@ -923,7 +975,10 @@ def inject_synthetic_transits(
 
             actual_depth = 1.0 - float(np.min(candidate_model))
             expected_depth = rp ** 2
-            if actual_depth >= max(MIN_DEPTH_FRAC * expected_depth, MIN_DEPTH_ABS):
+            n_in = int(np.sum(candidate_model < 1.0))
+            snr  = 0.8 * actual_depth * np.sqrt(n_in) / sigma if sigma > 0 else 0.0
+            if (actual_depth >= max(MIN_DEPTH_FRAC * expected_depth, MIN_DEPTH_ABS)
+                    and snr >= MIN_SNR):
                 lc_model = candidate_model
                 break
 
@@ -1124,6 +1179,19 @@ def run_acquisition_pipeline(
     }
 
 
+def select_labeled_targets(n_targets: int) -> list:
+    """Class-interleaved sample of unique labeled TIC IDs (so any prefix is balanced)."""
+    df = pd.read_csv(CATALOGS_DIR / "unified_labels.csv", dtype={"tic_id": str})
+    df = df[df["label"] >= 0].drop_duplicates("tic_id")
+    rng = np.random.default_rng(42)
+    groups = [g.sample(frac=1, random_state=int(rng.integers(1 << 31)))["tic_id"].tolist()
+              for _, g in df.groupby(["source", "label"])]
+    out = []
+    for i in range(max(len(g) for g in groups)):
+        out += [g[i] for g in groups if i < len(g)]
+    return out[:n_targets]
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import argparse
@@ -1135,7 +1203,16 @@ if __name__ == "__main__":
     parser.add_argument("--tce-records",  type=int, default=500, help="Max TCE rows from MAST")
     parser.add_argument("--concurrency",  type=int, default=8,
                         help="Max parallel light-curve downloads (default 8; lower if MAST rate-limits you)")
+    parser.add_argument("--labeled-targets", type=int, default=0,
+                        help="Download light curves for N labeled targets across all sectors (skips the sector pipeline)")
+    parser.add_argument("--max-sectors", type=int, default=2,
+                        help="With --labeled-targets: max sectors stitched per target")
     args = parser.parse_args()
+
+    if args.labeled_targets:
+        download_light_curves(select_labeled_targets(args.labeled_targets), sector=None,
+                              concurrency=args.concurrency, max_sectors=args.max_sectors)
+        raise SystemExit(0)
 
     run_acquisition_pipeline(
         sector          = args.sector,

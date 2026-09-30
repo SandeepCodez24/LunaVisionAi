@@ -36,5 +36,13 @@ joblib
 psutil
 tqdm
 
+# Classification (src/classifier.py)
+xgboost             # needs the OpenMP runtime on macOS:  brew install libomp
+lightgbm            # same libomp requirement; classifier falls back to
+                    # scikit-learn HistGradientBoosting if either won't load
+imbalanced-learn    # optional SMOTE (--smote)
+optuna              # hyperparameter search
+shap                # feature attributions
+
 # MAST / catalog access
 astroquery

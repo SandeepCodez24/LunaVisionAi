@@ -56,13 +56,20 @@ _SRC_DIR = Path(__file__).resolve().parent
 if str(_SRC_DIR) not in sys.path:
     sys.path.insert(0, str(_SRC_DIR))
 
+from detection import (  # noqa: E402,F401  (re-exported for backward compatibility)
+    TLS_PERIOD_MIN, TLS_PERIOD_MAX, TLS_OVERSAMPLING, TLS_DURATION_STEP, TLS_SDE_THRESHOLD,
+    MAX_SEGMENT_GAP_D,
+    run_tls, extract_geometry_features, select_search_window,
+)
+
 # GPU-accelerated feature functions (CuPy + PyTorch; CPU fallback built-in)
 from gpu_features import (  # noqa: E402
     gpu_phase_fold,
     gpu_timeseries_stats,
     gpu_fft_features,
-    gpu_morphological_bins,
+    compute_shape_features,
     compute_odd_even_depths,
+    compute_centroid_proxy,
     clear_gpu_cache,
     gpu_memory_used_gb,
     get_device_info,
@@ -91,11 +98,7 @@ CATALOGS_DIR.mkdir(parents=True, exist_ok=True)
 # ─────────────────────────────────────────────────────────────────────────────
 # TUNING PARAMETERS
 # ─────────────────────────────────────────────────────────────────────────────
-TLS_PERIOD_MIN      = 0.5      # days
-TLS_PERIOD_MAX      = 27.0     # days  (1 TESS sector)
-TLS_OVERSAMPLING    = 3        # Standard TLS oversampling (fast & accurate)
-TLS_DURATION_STEP   = 1.05
-TLS_SDE_THRESHOLD   = 5.0
+# TLS_* constants live in detection.py (imported below)
 N_PHASE_BINS        = 200
 SECONDARY_PHASE     = 0.5
 
@@ -192,104 +195,19 @@ def _run_with_timeout(fn, args=(), kwargs=None, timeout_sec: int = TASK_TIMEOUT_
 
 def _load_detrended(npz_path: Path) -> dict:
     data = np.load(npz_path, allow_pickle=True)
+    n = len(data["time"])
     return {
-        "tic_id":    str(data["tic_id"]),
-        "time":      data["time"].astype(np.float64),
-        "flat_flux": data["flat_flux"].astype(np.float64),
-        "rms_raw":   float(data["rms_raw"]) if "rms_raw" in data else np.nan,
-        "rms_det":   float(data["rms_detrended"]) if "rms_detrended" in data else np.nan,
-        "baseline":  float(data["baseline_days"]) if "baseline_days" in data else np.nan,
-        "sector":    int(data["sector"]) if "sector" in data else -1,
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CATEGORY 1 — Run TLS and extract transit geometry features
-# ─────────────────────────────────────────────────────────────────────────────
-
-def run_tls(time: np.ndarray, flat_flux: np.ndarray) -> dict:
-    """
-    Run Transit Least Squares periodogram and return raw TLS results dict.
-    Returns empty dict if TLS fails, signal below threshold, or times out.
-
-    TLS is single-threaded per call. The outer joblib/Parallel worker pool
-    is already CPU-limited, so we do not need per-TLS threading.
-    """
-    from transitleastsquares import transitleastsquares as TLS
-
-    finite = np.isfinite(time) & np.isfinite(flat_flux)
-    t = time[finite]
-    f = flat_flux[finite]
-
-    if len(t) < 200:
-        return {}
-
-    try:
-        model   = TLS(t, f)
-        results = model.power(
-            minimum_period      = TLS_PERIOD_MIN,
-            maximum_period      = min(TLS_PERIOD_MAX, (t[-1] - t[0]) / 2),
-            oversampling_factor = TLS_OVERSAMPLING,
-            duration_grid_step  = TLS_DURATION_STEP,
-            use_threads         = 2,
-            show_progress_bar   = False,
-        )
-        return results
-    except Exception as e:
-        log.debug("  TLS failed: %s", e)
-        return {}
-
-
-def extract_geometry_features(tls_results: dict, baseline: float) -> dict:
-    """Category 1 & 2 — Transit geometry and signal quality features from TLS."""
-    _empty = {
-        "period": np.nan, "depth": np.nan, "duration_hr": np.nan,
-        "transit_count": np.nan, "SDE": np.nan, "SNR": np.nan,
-        "FAP": np.nan, "phase_coverage": np.nan, "t0": np.nan,
-        "rp_rs": np.nan, "depth_ppm": np.nan,
-    }
-    if not tls_results or not hasattr(tls_results, "period"):
-        return _empty
-
-    r             = tls_results
-    period        = float(r.period)
-    # NOTE: transitleastsquares' results.depth is the flux LEVEL at the
-    # transit bottom (≈1 for a shallow transit), not the fractional dip —
-    # confirmed against the library's own source (main.py: `fractional_transit(
-    # ..., depth=1-depth, ...)` and `rp_rs_from_depth(depth=1-depth, ...)`
-    # both convert it before using it as an actual depth). Using r.depth
-    # directly here produced depth_ppm values of ~990,000-999,900 for every
-    # candidate regardless of the true transit depth — verified against
-    # synthetic injections with known depths of a few hundred to ~17,000 ppm.
-    depth         = 1.0 - float(r.depth)
-    duration_hr   = float(r.duration) * 24.0
-    transit_count = int(r.transit_count) if hasattr(r, "transit_count") else int(baseline / period)
-    SDE           = float(r.SDE)
-    SNR           = float(r.snr)  if hasattr(r, "snr")  else np.nan
-    FAP           = float(r.FAP)  if hasattr(r, "FAP")  else np.nan
-    t0            = float(r.T0)   if hasattr(r, "T0")   else np.nan
-    # TLS already computes rp_rs correctly from the corrected depth internally
-    # (via rp_rs_from_depth) — use it directly rather than re-deriving from
-    # our own (previously wrong) depth value.
-    if hasattr(r, "rp_rs") and np.isfinite(r.rp_rs):
-        rp_rs = float(r.rp_rs)
-    else:
-        rp_rs = float(np.sqrt(depth)) if depth > 0 else np.nan
-    phase_cov     = float(r.duty_cycle) if hasattr(r, "duty_cycle") \
-                    else (duration_hr / 24.0) / period
-
-    return {
-        "period":         period,
-        "depth":          depth,
-        "depth_ppm":      depth * 1e6,
-        "duration_hr":    duration_hr,
-        "transit_count":  transit_count,
-        "SDE":            SDE,
-        "SNR":            SNR,
-        "FAP":            FAP,
-        "t0":             t0,
-        "rp_rs":          rp_rs,
-        "phase_coverage": phase_cov,
+        "tic_id":     str(data["tic_id"]),
+        "time":       data["time"].astype(np.float64),
+        "flat_flux":  data["flat_flux"].astype(np.float64),
+        "rms_raw":    float(data["rms_raw"]) if "rms_raw" in data else np.nan,
+        "rms_det":    float(data["rms_detrended"]) if "rms_detrended" in data else np.nan,
+        "baseline":   float(data["baseline_days"]) if "baseline_days" in data else np.nan,
+        "sector":     int(data["sector"]) if "sector" in data else -1,
+        "mom_centr1": (data["mom_centr1"].astype(np.float64) if "mom_centr1" in data
+                       else np.full(n, np.nan)),
+        "mom_centr2": (data["mom_centr2"].astype(np.float64) if "mom_centr2" in data
+                       else np.full(n, np.nan)),
     }
 
 
@@ -305,8 +223,12 @@ def _load_tic_catalog() -> pd.DataFrame:
     if _tic_df is None:
         tic_path = CATALOGS_DIR / "tic_stellar_params.csv"
         if tic_path.exists():
-            _tic_df = pd.read_csv(tic_path, dtype={"tic_id": str})
-            _tic_df = _tic_df.set_index("tic_id")
+            # Tolerate the whitespace-padded fixed-width CSV that the MAST
+            # crossmatch wrote ("tic_id   ," headers broke the index lookup).
+            _tic_df = pd.read_csv(tic_path, skipinitialspace=True)
+            _tic_df.columns = _tic_df.columns.str.strip()
+            _tic_df["tic_id"] = _tic_df["tic_id"].astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+            _tic_df = _tic_df.drop_duplicates("tic_id").set_index("tic_id")
         else:
             _tic_df = pd.DataFrame()
     return _tic_df
@@ -365,10 +287,16 @@ def extract_features_one(npz_path: Path, label: int = -1) -> dict:
         return base_row
 
     tic_id    = lc["tic_id"]
-    time      = lc["time"]
-    flat_flux = lc["flat_flux"]
+    # Longest contiguous segment only (see select_search_window): sectors
+    # months apart would otherwise blow up TLS runtime and smear the fold.
+    # Centroid columns are trimmed identically so they stay index-aligned
+    # with `time` for compute_centroid_proxy below.
+    time, flat_flux, mom_centr1, mom_centr2 = select_search_window(
+        lc["time"], lc["flat_flux"], MAX_SEGMENT_GAP_D,
+        lc["mom_centr1"], lc["mom_centr2"],
+    )
     rms_raw   = lc["rms_raw"]
-    baseline  = lc["baseline"]
+    baseline  = float(time[-1] - time[0]) if len(time) > 1 else lc["baseline"]
 
     log.debug("  Extracting features: %s", tic_id)
 
@@ -387,23 +315,19 @@ def extract_features_one(npz_path: Path, label: int = -1) -> dict:
 
         dur_phase = (duration_hr / 24.0) / period if not np.isnan(duration_hr) else 0.0
 
-        # Primary depth for secondary ratio calculation
-        in_transit_mask   = np.abs(phase_arr) < (dur_phase / 2)
-        transit_flux_vals = binned[in_transit_mask]
-        primary_depth     = (1.0 - float(np.nanmean(transit_flux_vals))
-                             if transit_flux_vals.size > 0 else None)
-
-        # Morphological features on GPU
-        morph_bins = gpu_morphological_bins(
-            phase_arr, binned, dur_phase,
-            primary_depth=primary_depth,
+        # Transit-shape features — computed on raw phase-folded points (not
+        # the coarse 200-bin global fold, which under-resolves short
+        # transits — see compute_shape_features docstring).
+        shape_feat = compute_shape_features(
+            time, flat_flux, period, t0, dur_phase,
             secondary_phase=SECONDARY_PHASE,
         )
+        shape_feat["phase_folded_std"] = float(np.nanstd(binned))
 
         # Odd/even depths — CPU (epoch iteration)
         odd_even = compute_odd_even_depths(time, flat_flux, period, t0, duration_hr)
 
-        morph_feat = {**morph_bins, **odd_even}
+        morph_feat = {**shape_feat, **odd_even}
 
         # ── Cat 9: GPU FFT features on phase-folded flux ──────────────────────
         tsf_feat = gpu_fft_features(binned)
@@ -435,7 +359,12 @@ def extract_features_one(npz_path: Path, label: int = -1) -> dict:
         binned     = None
 
     # ── Cat 6: Centroid proxy ─────────────────────────────────────────────────
-    centroid_feat = {"centroid_proxy": np.nan}
+    if not np.isnan(period) and not np.isnan(t0) and period > 0:
+        centroid_feat = compute_centroid_proxy(
+            time, mom_centr1, mom_centr2, period, t0, dur_phase,
+        )
+    else:
+        centroid_feat = {"centroid_proxy": np.nan}
 
     # ── Cat 7: Stellar parameters from TIC ───────────────────────────────────
     stellar_feat = extract_stellar_features(tic_id)
@@ -553,16 +482,30 @@ def extract_features_batch(
         return existing_df if existing_df is not None else pd.DataFrame()
 
     # Build label lookup
+    def _norm(tid) -> str:
+        # "TIC_123" (npz stem) / "TIC 123" / "123" / "123.0" all -> "123"
+        t = str(tid).strip()
+        for pre in ("TIC_", "TIC "):
+            if t.startswith(pre):
+                t = t[len(pre):]
+        return t[:-2] if t.endswith(".0") else t
+
     label_map: dict[str, int] = {}
     if label_csv and Path(label_csv).exists():
-        ldf = pd.read_csv(label_csv, dtype={"tic_id": str})
-        if "label" in ldf.columns:
-            label_map = dict(zip(ldf["tic_id"], ldf["label"].astype(int)))
+        label_files = [Path(label_csv)]
+        syn_csv = Path(label_csv).parent / "synthetic_injections.csv"
+        if syn_csv.exists() and syn_csv != Path(label_csv):
+            label_files.append(syn_csv)     # SYN_* ids live in their own catalog
+        for lf in label_files:
+            ldf = pd.read_csv(lf, dtype={"tic_id": str})
+            if "label" in ldf.columns:
+                label_map.update({_norm(t): int(l) for t, l in zip(ldf["tic_id"], ldf["label"])
+                                  if l == l})
 
     # ── Worker wrapper with timeout ───────────────────────────────────────────
     def _worker(f: Path) -> dict:
         """Run extraction with per-task timeout."""
-        label = label_map.get(f.stem, -1)
+        label = label_map.get(_norm(f.stem), -1)
         try:
             return _run_with_timeout(
                 extract_features_one, args=(f, label), timeout_sec=timeout_sec

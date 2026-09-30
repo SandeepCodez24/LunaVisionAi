@@ -61,6 +61,7 @@ CADENCE_MIN       = 0.0014  # 2-min cadence in days  ≈ 0.00139
 SIGMA_CLIP_SIG    = 3.0
 SIGMA_CLIP_ITERS  = 5
 GAP_FILL_MAX_CAD  = 3       # interpolate gaps ≤ this many cadences
+MAX_ROBUST_RMS    = 0.02    # 2% point-to-point scatter: beyond this a 2-min light curve is unusable
 WOTAN_WINDOW      = 0.75    # bi-weight detrending window (days)
 
 
@@ -83,7 +84,12 @@ def sigma_clip_flux(
     maxiters: int = SIGMA_CLIP_ITERS,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Iterative sigma-clipping to remove outliers and cosmic rays.
+    Iterative UPPER-ONLY sigma-clipping to remove cosmic rays / flares.
+
+    Only positive outliers are clipped. A symmetric clip on the not-yet-
+    detrended flux deletes the transit itself (any dip deeper than a few
+    sigma of the out-of-transit scatter is a "low outlier"), which erased
+    injected AND real transits before TLS ever saw them.
 
     Returns
     -------
@@ -91,7 +97,8 @@ def sigma_clip_flux(
     """
     from astropy.stats import sigma_clip as astropy_sigma_clip
 
-    clipped = astropy_sigma_clip(flux, sigma=sigma, maxiters=maxiters, masked=True)
+    clipped = astropy_sigma_clip(flux, sigma_lower=np.inf, sigma_upper=sigma,
+                                     maxiters=maxiters, masked=True)
     good    = ~clipped.mask & np.isfinite(flux) & np.isfinite(time)
     return time[good], flux[good], good
 
@@ -206,13 +213,15 @@ def quality_gate(
     if baseline < MIN_DAYS:
         return False, f"baseline {baseline:.1f}d < {MIN_DAYS}d"
 
-    # Rule 2: noise floor check
-    rms = float(np.nanstd(f_ok))
-    # Expected photon noise: empirical proxy ~ 1/sqrt(N_cadences_per_hour)
-    n_per_hour    = 30       # 2-min cadence → 30 cadences/hour
-    expected_rms  = 1.0 / np.sqrt(n_per_hour * max(len(f_ok), 1))
-    if rms > NOISE_SIGMA_LIMIT * expected_rms:
-        return False, f"rms {rms:.4f} > {NOISE_SIGMA_LIMIT}× expected {expected_rms:.4f}"
+    # Rule 2: noise ceiling. Uses the robust (MAD) scatter so deep transits
+    # don't count as "noise", and an absolute ceiling rather than the old
+    # `5 x 1/sqrt(30*N)` proxy: that proxy depends only on the number of
+    # cadences, not on stellar brightness, so it rejected every faint star
+    # (~40% of the dataset, and 47% of the planet-class targets vs 25% of the
+    # non-planet class — a class-biased loss of exactly the examples we need).
+    robust_rms = 1.4826 * float(np.nanmedian(np.abs(f_ok - np.nanmedian(f_ok))))
+    if robust_rms > MAX_ROBUST_RMS:
+        return False, f"robust rms {robust_rms:.4f} > {MAX_ROBUST_RMS}"
 
     return True, "ok"
 
@@ -239,8 +248,16 @@ def preprocess_one(
 
     out_path = output_dir / npz_path.name
     if out_path.exists():
-        result.update(status="skipped", reason="already exists", out_path=str(out_path))
-        return result
+        # Same reasoning as acquisition.py's resume check: a file from before
+        # centroid columns were added lacks mom_centr1 — re-run those rather
+        # than silently leaving them without centroid_proxy forever.
+        try:
+            with np.load(out_path) as d:
+                if "mom_centr1" in d:
+                    result.update(status="skipped", reason="already exists", out_path=str(out_path))
+                    return result
+        except Exception:
+            pass   # corrupt/truncated file — fall through and reprocess
 
     try:
         # ── Load raw data ────────────────────────────────────────────────────
@@ -249,6 +266,13 @@ def preprocess_one(
         pdcsap_flux = data["pdcsap_flux"].astype(np.float64)
         quality     = data["quality"].astype(np.int32)
         sector      = int(data["sector"]) if "sector" in data else -1
+        # Flux-weighted centroid (row/col); absent on light curves downloaded
+        # before this column was captured — NaN-fill rather than fail so
+        # those targets still get everything except centroid_proxy.
+        mom_centr1  = (data["mom_centr1"].astype(np.float64) if "mom_centr1" in data
+                      else np.full(len(time), np.nan))
+        mom_centr2  = (data["mom_centr2"].astype(np.float64) if "mom_centr2" in data
+                      else np.full(len(time), np.nan))
 
         if len(time) < 100:
             result["reason"] = "fewer than 100 cadences"
@@ -260,6 +284,8 @@ def preprocess_one(
 
         # ── Step 2: Sigma-clip ───────────────────────────────────────────────
         time_cl, flux_cl, good_mask = sigma_clip_flux(time, flux_norm)
+        centr1_cl = mom_centr1[good_mask]
+        centr2_cl = mom_centr2[good_mask]
 
         if len(time_cl) < 100:
             result["reason"] = f"only {len(time_cl)} cadences after sigma-clip"
@@ -291,6 +317,8 @@ def preprocess_one(
             flux_norm     = flux_cl,
             gap_mask      = gap_mask,
             quality       = quality[:len(time_cl)],   # trimmed to match
+            mom_centr1    = centr1_cl,
+            mom_centr2    = centr2_cl,
             sector        = sector,
             rms_raw       = rms_raw,
             rms_detrended = rms_detrended,

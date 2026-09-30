@@ -1,0 +1,149 @@
+{
+  "base_learners": [
+    "hgb"
+  ],
+  "n_features": 65,
+  "train_rows": 1741,
+  "test": {
+    "n": 530,
+    "class_counts": {
+      "0": 356,
+      "3": 174
+    },
+    "confusion_matrix": [
+      [
+        327,
+        29
+      ],
+      [
+        108,
+        66
+      ]
+    ],
+    "report": {
+      "0": {
+        "precision": 0.7517241379310344,
+        "recall": 0.9185393258426966,
+        "f1-score": 0.8268015170670038,
+        "support": 356.0
+      },
+      "3": {
+        "precision": 0.6947368421052632,
+        "recall": 0.3793103448275862,
+        "f1-score": 0.49070631970260226,
+        "support": 174.0
+      },
+      "accuracy": 0.7415094339622641,
+      "macro avg": {
+        "precision": 0.7232304900181488,
+        "recall": 0.6489248353351413,
+        "f1-score": 0.658753918384803,
+        "support": 530.0
+      },
+      "weighted avg": {
+        "precision": 0.7330151011882341,
+        "recall": 0.7415094339622641,
+        "f1-score": 0.7164608296303889,
+        "support": 530.0
+      }
+    },
+    "positive_class": 0,
+    "roc_auc": 0.7499596409660338,
+    "pr_auc": 0.8404014879877735,
+    "brier": 0.18227557863898602
+  },
+  "top_features": [
+    {
+      "feature": "flat_bottom_score",
+      "permutation": 0.02075471698113207
+    },
+    {
+      "feature": "tsf_fft_coeff_2_real",
+      "permutation": 0.017735849056603768
+    },
+    {
+      "feature": "tsf_fft_coeff_8_abs",
+      "permutation": 0.016603773584905657
+    },
+    {
+      "feature": "phase_coverage",
+      "permutation": 0.015471698113207543
+    },
+    {
+      "feature": "tsf_fft_coeff_9_real",
+      "permutation": 0.013584905660377355
+    },
+    {
+      "feature": "flux_percentile_5",
+      "permutation": 0.011698113207547167
+    },
+    {
+      "feature": "SNR",
+      "permutation": 0.009433962264150941
+    },
+    {
+      "feature": "tsf_fft_coeff_1_real",
+      "permutation": 0.009433962264150941
+    },
+    {
+      "feature": "tsf_fft_coeff_5_abs",
+      "permutation": 0.009433962264150941
+    },
+    {
+      "feature": "tsf_fft_coeff_4_real",
+      "permutation": 0.009056603773584904
+    },
+    {
+      "feature": "ingress_egress_asym",
+      "permutation": 0.008679245283018866
+    },
+    {
+      "feature": "duration_hr",
+      "permutation": 0.008301886792452829
+    },
+    {
+      "feature": "tsf_median",
+      "permutation": 0.007169811320754715
+    },
+    {
+      "feature": "above_3sigma_frac",
+      "permutation": 0.006792452830188677
+    },
+    {
+      "feature": "tsf_fft_coeff_6_real",
+      "permutation": 0.006792452830188677
+    }
+  ],
+  "learning_curve": [
+    {
+      "fraction": 0.2,
+      "n_train": 346,
+      "roc_auc": 0.7032158078264238,
+      "pr_auc": 0.8093938341408661
+    },
+    {
+      "fraction": 0.4,
+      "n_train": 700,
+      "roc_auc": 0.6825116234017823,
+      "pr_auc": 0.8017584980962057
+    },
+    {
+      "fraction": 0.6,
+      "n_train": 1050,
+      "roc_auc": 0.7118445692883895,
+      "pr_auc": 0.8236054949429363
+    },
+    {
+      "fraction": 0.8,
+      "n_train": 1395,
+      "roc_auc": 0.7175594084979983,
+      "pr_auc": 0.8146986885221352
+    },
+    {
+      "fraction": 1.0,
+      "n_train": 1741,
+      "roc_auc": 0.7499596409660338,
+      "pr_auc": 0.8404014879877735
+    }
+  ]
+}

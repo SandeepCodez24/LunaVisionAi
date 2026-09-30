@@ -437,143 +437,98 @@ def _cpu_fft_features(flux: np.ndarray, n_coeff: int) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GPU MORPHOLOGICAL FEATURES (flat-bottom, ingress/egress, secondary)
+# TRANSIT SHAPE FEATURES (flat-bottom vs. V-shape, ingress/egress, secondary)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def gpu_morphological_bins(
-    phase_arr:   np.ndarray,
-    binned_flux: np.ndarray,
-    dur_phase:   float,
-    primary_depth: Optional[float] = None,
+def compute_shape_features(
+    time:            np.ndarray,
+    flux:            np.ndarray,
+    period:          float,
+    t0:              float,
+    dur_phase:       float,
     secondary_phase: float = 0.5,
+    min_pts:         int = 8,
 ) -> dict:
     """
-    Compute morphological features from pre-binned phase-folded flux.
-    GPU-accelerated via CuPy when available.
+    Transit-shape features computed directly on phase-folded points, not on
+    a fixed 200-bin global fold.
 
-    Parameters
-    ----------
-    phase_arr       : bin centre phases in [-0.5, 0.5]
-    binned_flux     : mean flux per bin
-    dur_phase       : transit duration in phase units
-    primary_depth   : depth of primary transit (for secondary_ratio)
-    secondary_phase : phase of secondary eclipse to check (default 0.5)
+    Why this replaces the old bin-based version: the global fold bins the
+    entire [-0.5, 0.5] phase range into N_PHASE_BINS (200) equal-width bins.
+    For a typical multi-day period and a few-hour transit, dur_phase is
+    ~0.01-0.05, so only 2-10 of those 200 bins fall inside the transit —
+    far too few to resolve its *shape*, which is the whole point of these
+    features. Verified in practice: flat_bottom_score, ingress_egress_asym
+    and secondary_ratio all had ROC-AUC 0.50-0.55 against confirmed TFOP
+    dispositions on ~1,700 real targets (indistinguishable from noise)
+    before this fix. This version instead masks the raw per-point
+    phase-folded data — which pools every observed transit, often hundreds
+    to thousands of points — directly by phase, and takes robust (median)
+    statistics within each zone.
+
+    Shape diagnostic (flat_bottom_score): let u = |phase| / (dur_phase/2),
+    so u=0 is transit center and u=1 is the nominal edge (T14/2). A flat-
+    bottomed transit (planet, or a fully-eclipsing EB) stays near full
+    depth until close to u=1 (ingress/egress is a small fraction of the
+    duration); a V-shaped one (grazing eclipse — the classic EB/blend
+    false-positive shape) tapers linearly from center to edge. Comparing
+    depth at u in [0, 0.35] ("core") against u in [0.55, 0.85] ("shoulder",
+    chosen short of the universal edge taper near u=1) separates these:
+    shoulder/core is close to 1 for a flat bottom and well below 1
+    (~0.3 for an idealised triangular V-shape) for a graze.
 
     Returns
     -------
-    dict with: flat_bottom_score, phase_folded_std, ingress_egress_asym,
-               secondary_depth, secondary_ratio
+    dict: flat_bottom_score, ingress_egress_asym, secondary_depth,
+          secondary_ratio  (each NaN if too few points fall in a zone)
     """
-    if _CUPY_AVAILABLE:
-        try:
-            return _gpu_morphological_cupy(
-                phase_arr, binned_flux, dur_phase,
-                primary_depth, secondary_phase
-            )
-        except Exception as e:
-            log.debug("[GPU] morphological fallback to CPU: %s", e)
-    return _cpu_morphological(
-        phase_arr, binned_flux, dur_phase,
-        primary_depth, secondary_phase
-    )
+    out = {"flat_bottom_score": np.nan, "ingress_egress_asym": np.nan,
+           "secondary_depth": np.nan, "secondary_ratio": np.nan}
+    if not (np.isfinite(dur_phase) and dur_phase > 0
+            and np.isfinite(period) and period > 0 and np.isfinite(t0)):
+        return out
 
+    phase = ((time - t0) % period) / period
+    phase = np.where(phase > 0.5, phase - 1.0, phase)
+    finite = np.isfinite(phase) & np.isfinite(flux)
+    phase, flux = phase[finite], flux[finite]
+    if phase.size < min_pts * 4:
+        return out
 
-def _gpu_morphological_cupy(
-    phase_arr: np.ndarray,
-    binned_flux: np.ndarray,
-    dur_phase: float,
-    primary_depth: Optional[float],
-    secondary_phase: float,
-) -> dict:
-    import cupy as cp
+    half = dur_phase / 2.0
+    ap   = np.abs(phase)
 
-    pa  = cp.asarray(phase_arr,   dtype=cp.float64)
-    bf  = cp.asarray(binned_flux, dtype=cp.float64)
+    baseline_mask = (ap > half * 0.8) & (ap < half * 3.0)
+    core_mask     = ap < half * 0.35
+    if baseline_mask.sum() < min_pts or core_mask.sum() < min_pts:
+        return out
+    baseline   = float(np.nanmedian(flux[baseline_mask]))
+    depth_core = baseline - float(np.nanmedian(flux[core_mask]))
+    if not (np.isfinite(depth_core) and depth_core > 0):
+        return out
 
-    in_transit  = cp.abs(pa) < (dur_phase / 2)
-    out_transit = cp.abs(pa) > (dur_phase * 1.5)
+    shoulder_mask = (ap >= half * 0.55) & (ap < half * 0.85)
+    if shoulder_mask.sum() >= min_pts:
+        depth_shoulder = baseline - float(np.nanmedian(flux[shoulder_mask]))
+        out["flat_bottom_score"] = float(np.clip(depth_shoulder / depth_core, 0.0, 2.0))
 
-    transit_flux = bf[in_transit]
-    oot_flux     = bf[out_transit]
+    left_mask  = (phase >= -half) & (phase < -half * 0.1)
+    right_mask = (phase > half * 0.1) & (phase <= half)
+    if left_mask.sum() >= min_pts and right_mask.sum() >= min_pts:
+        depth_l = baseline - float(np.nanmedian(flux[left_mask]))
+        depth_r = baseline - float(np.nanmedian(flux[right_mask]))
+        out["ingress_egress_asym"] = float((depth_l - depth_r) / depth_core)
 
-    # Flat bottom score
-    std_in  = float(cp.nanstd(transit_flux).get())  if transit_flux.size > 2 else np.nan
-    std_out = float(cp.nanstd(oot_flux).get())      if oot_flux.size > 2     else np.nan
-    fbs = std_in / std_out if (std_out and std_out > 0) else np.nan
+    # Circular distance from secondary_phase (phase wraps at +/-0.5).
+    d = phase - secondary_phase
+    d = np.abs(np.mod(d + 0.5, 1.0) - 0.5)
+    sec_mask = d < half
+    if sec_mask.sum() >= min_pts:
+        depth_sec = max(baseline - float(np.nanmedian(flux[sec_mask])), 0.0)
+        out["secondary_depth"] = depth_sec
+        out["secondary_ratio"] = depth_sec / depth_core
 
-    # Phase folded std
-    pf_std = float(cp.nanstd(bf).get())
-
-    # Ingress / egress asymmetry (compare left half vs right half of transit window)
-    half         = len(phase_arr) // 2
-    win          = int(half * dur_phase)
-    ingress_bins = bf[half - win : half]
-    egress_bins  = bf[half : half + win]
-    if ingress_bins.size > 0 and egress_bins.size > 0:
-        iea = float((cp.nanmean(ingress_bins) - cp.nanmean(egress_bins)).get())
-    else:
-        iea = np.nan
-
-    # Secondary eclipse at secondary_phase
-    sec_mask = cp.abs(pa - secondary_phase) < (dur_phase / 2)
-    if sec_mask.any() and not cp.isnan(bf[sec_mask]).all():
-        sec_depth = 1.0 - float(cp.nanmean(bf[sec_mask]).get())
-        sec_depth = max(sec_depth, 0.0)
-        sec_ratio = (sec_depth / primary_depth
-                     if (primary_depth and primary_depth > 0) else np.nan)
-    else:
-        sec_depth = np.nan
-        sec_ratio = np.nan
-
-    return {
-        "flat_bottom_score":  fbs,
-        "phase_folded_std":   pf_std,
-        "ingress_egress_asym": iea,
-        "secondary_depth":    sec_depth,
-        "secondary_ratio":    sec_ratio,
-    }
-
-
-def _cpu_morphological(
-    phase_arr: np.ndarray,
-    binned_flux: np.ndarray,
-    dur_phase: float,
-    primary_depth: Optional[float],
-    secondary_phase: float,
-) -> dict:
-    in_transit  = np.abs(phase_arr) < (dur_phase / 2)
-    out_transit = np.abs(phase_arr) > (dur_phase * 1.5)
-
-    transit_flux = binned_flux[in_transit]
-    oot_flux     = binned_flux[out_transit]
-
-    std_in  = np.nanstd(transit_flux) if transit_flux.size > 2 else np.nan
-    std_out = np.nanstd(oot_flux)     if oot_flux.size > 2     else np.nan
-    fbs = std_in / std_out if (std_out and std_out > 0) else np.nan
-    pf_std = float(np.nanstd(binned_flux))
-
-    half     = len(phase_arr) // 2
-    win      = int(half * dur_phase)
-    ing_bins = binned_flux[half - win : half]
-    egr_bins = binned_flux[half : half + win]
-    iea = float(np.nanmean(ing_bins) - np.nanmean(egr_bins)) \
-          if (len(ing_bins) > 0 and len(egr_bins) > 0) else np.nan
-
-    sec_mask = np.abs(phase_arr - secondary_phase) < (dur_phase / 2)
-    if sec_mask.sum() > 0 and not np.isnan(binned_flux[sec_mask]).all():
-        sec_depth = max(1.0 - float(np.nanmean(binned_flux[sec_mask])), 0.0)
-        sec_ratio = (sec_depth / primary_depth
-                     if (primary_depth and primary_depth > 0) else np.nan)
-    else:
-        sec_depth = sec_ratio = np.nan
-
-    return {
-        "flat_bottom_score":   fbs,
-        "phase_folded_std":    pf_std,
-        "ingress_egress_asym": iea,
-        "secondary_depth":     sec_depth,
-        "secondary_ratio":     sec_ratio,
-    }
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -588,9 +543,20 @@ def compute_odd_even_depths(
     duration_hr: float,
 ) -> dict:
     """
-    Compute mean odd and even transit depths.
+    Compute median odd and even transit depths.
     This remains CPU-side since it iterates over individual epochs.
+
+    Requires at least MIN_TRANSITS_PER_PARITY valid transits on *each* side
+    (odd and even) before returning a ratio — a ratio built from one noisy
+    single-transit depth on either side is indistinguishable from real EB
+    signal, and was a likely contributor to this feature's ~0.50 AUC
+    (essentially random) against confirmed TFOP dispositions. Uses the
+    median depth per transit (not the mean) so one bad cadence inside a
+    single transit's window doesn't dominate that transit's depth estimate.
     """
+    MIN_TRANSITS_PER_PARITY = 2
+    MIN_PTS_PER_TRANSIT     = 5
+
     finite     = np.isfinite(time) & np.isfinite(flat_flux)
     t_ok, f_ok = time[finite], flat_flux[finite]
 
@@ -604,16 +570,92 @@ def compute_odd_even_depths(
 
     for k, epoch in enumerate(transit_epochs):
         mask = np.abs(t_ok - epoch) < half_dur
-        if mask.sum() < 3:
+        if mask.sum() < MIN_PTS_PER_TRANSIT:
             continue
-        depth_k = 1.0 - float(np.nanmean(f_ok[mask]))
+        depth_k = 1.0 - float(np.nanmedian(f_ok[mask]))
         (even_depths if k % 2 == 0 else odd_depths).append(depth_k)
 
-    odd_d  = float(np.nanmean(odd_depths))  if odd_depths  else np.nan
-    even_d = float(np.nanmean(even_depths)) if even_depths else np.nan
-    ratio  = float(odd_d / even_d) if (odd_d and even_d and even_d != 0) else np.nan
+    if len(odd_depths) < MIN_TRANSITS_PER_PARITY or len(even_depths) < MIN_TRANSITS_PER_PARITY:
+        return {"odd_depth": np.nan, "even_depth": np.nan, "odd_even_ratio": np.nan}
+
+    odd_d  = float(np.nanmedian(odd_depths))
+    even_d = float(np.nanmedian(even_depths))
+    ratio  = float(odd_d / even_d) if even_d != 0 else np.nan
 
     return {"odd_depth": odd_d, "even_depth": even_d, "odd_even_ratio": ratio}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CENTROID OFFSET (background-blend / false-positive check)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_centroid_proxy(
+    time:      np.ndarray,
+    mom_centr1: np.ndarray,
+    mom_centr2: np.ndarray,
+    period:    float,
+    t0:        float,
+    dur_phase: float,
+    min_pts:   int = 8,
+) -> dict:
+    """
+    Centroid-offset significance: does the star's flux-weighted photocenter
+    move during the transit?
+
+    A transit on the target star should not move its own centroid (beyond
+    noise). A transit signal actually coming from a fainter background star
+    blended into the same aperture — the single most common real false-
+    positive mechanism TFOP follow-up rules out with dedicated centroid/
+    imaging observations — shifts the *aperture's* photocenter toward that
+    background star specifically during the dip. This is the standard
+    "difference-image centroid offset" check (as used in the Kepler/TESS
+    DV reports and Robovetter), computed here from the MOM_CENTR1/2 columns
+    every SPOC light curve FITS already ships — no separate Target Pixel
+    File download needed.
+
+    Returns a dimensionless offset-significance: the in-transit vs.
+    out-of-transit centroid shift in each axis, divided by that axis's
+    out-of-transit scatter (to be comparable across targets of different
+    brightness/aperture size), combined in quadrature. ~0 = no detectable
+    shift (consistent with an on-target transit); large = the dip's source
+    is offset from the target, i.e. likely a blend.
+
+    Returns
+    -------
+    dict: {"centroid_proxy": float}  (NaN if too few finite centroid points
+          or the transit ephemeris is unusable — most light curves
+          downloaded before this feature was added have no centroid data
+          at all, and will always return NaN here, not an error)
+    """
+    out = {"centroid_proxy": np.nan}
+    if not (np.isfinite(dur_phase) and dur_phase > 0
+            and np.isfinite(period) and period > 0 and np.isfinite(t0)):
+        return out
+
+    phase = ((time - t0) % period) / period
+    phase = np.where(phase > 0.5, phase - 1.0, phase)
+    finite = (np.isfinite(phase) & np.isfinite(mom_centr1) & np.isfinite(mom_centr2))
+    phase = phase[finite]
+    c1, c2 = mom_centr1[finite], mom_centr2[finite]
+    if phase.size < min_pts * 4:
+        return out
+
+    half = dur_phase / 2.0
+    ap   = np.abs(phase)
+    in_mask  = ap < half * 0.5
+    out_mask = (ap > half * 1.5) & (ap < half * 6.0)
+    if in_mask.sum() < min_pts or out_mask.sum() < min_pts:
+        return out
+
+    sigma1 = float(np.nanstd(c1[out_mask]))
+    sigma2 = float(np.nanstd(c2[out_mask]))
+    if not (sigma1 > 0 and sigma2 > 0):
+        return out
+
+    shift1 = float(np.nanmedian(c1[in_mask]) - np.nanmedian(c1[out_mask]))
+    shift2 = float(np.nanmedian(c2[in_mask]) - np.nanmedian(c2[out_mask]))
+    out["centroid_proxy"] = float(np.hypot(shift1 / sigma1, shift2 / sigma2))
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────

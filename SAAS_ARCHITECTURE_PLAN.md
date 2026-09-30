@@ -3,7 +3,7 @@
 > **Status**: Proposal / North-star architecture
 > **Supersedes in scope (not in content)**: `Implementation_Plan.md` — that document remains the authoritative spec for the *scientific pipeline* (Stages 1–6). This document wraps that pipeline into a real commercial product and defines everything the hackathon scope never had to consider: multi-tenancy, billing, reliability, security, and scale.
 > **Author context**: Written after auditing the current `exoplanet_pipeline/` codebase against `College_Project.pdf` (PRD v1.0) and the existing `Implementation_Plan.md`.
-> **No code was changed to produce this document.**
+> **Original draft**: written with no code changes. **Updated 2026-09-19** with implementation progress — see §2 (refreshed audit) and Appendix A (progress log).
 
 ---
 
@@ -32,20 +32,20 @@ The recommended path is **not** a rewrite. The acquisition/preprocessing/feature
 
 | Module | Path | Lines | Status | Notes |
 |---|---|---:|---|---|
-| Acquisition | `src/acquisition.py` | 789 | ✅ Substantially built | MAST querying, TOI/ExoFOP/TCE parsing, TIC crossmatch, synthetic transit injection, full acquisition pipeline runner |
-| Preprocessing | `src/preprocessing.py` | 404 | ✅ Substantially built | Normalize, sigma-clip, gap-fill, `wotan` detrend, quality gating, batch runner |
-| Feature engineering | `src/features.py` | 665 | 🟡 Partially built | TLS run + geometry/stellar features exist here (not yet split into its own detection stage per the plan); has RAM guards, timeouts, parallel batch extraction |
+| Acquisition | `src/acquisition.py` | 1,190 | ✅ Built & live-verified | Parallel (8-way) MAST downloads with retry/backoff and cache-poisoning recovery, auto-download of ExoFOP/NASA catalogs, unified label catalog, label-driven target selection (`--labeled-targets`, `--max-sectors`), detectability-checked synthetic injection |
+| Preprocessing | `src/preprocessing.py` | 412 | ✅ Built, 2 major bugs fixed | Upper-only sigma clip (symmetric clip was deleting transits); noise gate replaced with robust-scatter ceiling (old gate rejected ~40% of targets, class-biased) |
+| Feature engineering | `src/features.py` | 636 | ✅ Built (re-extraction on full set pending) | TLS moved out to `detection.py`; label-ID normalization fixed; TLS depth semantics fixed; CSV schema/append corruption fixed; RAM guards, timeouts, parallel batch extraction |
 | GPU features | `src/gpu_features.py` | 622 | ✅ Built, **not in original PRD** | CuPy/PyTorch-accelerated phase-fold, time-series stats, FFT features, morphological bins, odd/even depth, with CPU fallback for every GPU path — this is a genuine enhancement beyond the hackathon spec |
-| Detection (standalone) | `src/detection.py` | 0 | ❌ Empty stub | TLS/BLS is currently *inline* inside `features.py`; needs extraction into its own module per `Implementation_Plan.md` §4 Stage 3 |
+| Detection (standalone) | `src/detection.py` | 153 | 🟡 Built, needs unit tests | `run_tls`, `extract_geometry_features`, `detect_candidate` (SDE≥7, FAP<0.01), `detect_batch`; fixed TLS `period_min/period_max` kwargs that were being silently ignored |
 | Classification | `src/classifier.py` | 0 | ❌ Empty stub | No XGBoost/LightGBM ensemble, no SMOTE, no calibration, no model artifact |
 | Parameter fitting | `src/fitting.py` | 0 | ❌ Empty stub | No `batman`/`emcee` MCMC fitting |
 | Visualization | `src/visualization.py` | 0 | ❌ Empty stub | None of the 7 required plots exist |
 | Reporting | `src/report.py` | 0 | ❌ Empty stub | No PDF/HTML/catalog generation |
 | Orchestrator + 6 agents | `src/agents/*.py` | 0 each | ❌ Empty stubs | Entire multi-agent layer is unwritten |
-| Frontend | `frontend/app.py` | 0 | ❌ Empty stub | No Streamlit dashboard yet |
+| Frontend | `frontend/app.py`, `frontend/transit_log.html` | 0 / 792 | 🟡 Prototype | `transit_log.html` is a static animated dashboard (embedded snapshot of 39 targets, published as an artifact); not yet wired to live data or a backend; `app.py` still empty |
 | CLI entrypoint | `run_pipeline.py` | 0 | ❌ Empty stub | No end-to-end runnable pipeline yet |
 
-**What already exists as real assets** (not just code): downloaded TESS FITS files for Sector 1 (`data/raw/sector_01_dvt/...`), ~28 detrended real light curves and ~50 synthetic-injection light curves (`data/processed/lc_*`), reference catalogs (ExoFOP TOI, NASA confirmed planets, SPOC TCE, TIC stellar params, unified labels, synthetic injections) under `data/catalogs/`, and a `feature_matrix.csv`. This is real, usable training/validation data — a head start most "SaaS from an idea" projects don't have.
+**What already exists as real assets** (as of 2026-09-19): 2,360 real SPOC 2-min light curves downloaded across sectors (1.0 GB, ≤2 sectors stitched per target, ~28% of requested targets have no SPOC 2-min data), of which 2,120 pass preprocessing (1,423 planet-side / label 0, 697 non-planet / label 3), plus 192 usable synthetic injections (199 generated, label-3 hosts, ≥3 transits, SNR≥8). Catalogs under `data/catalogs/`: ExoFOP TOI (8,149), NASA confirmed (6,367), SPOC TCE, TIC stellar params, unified labels (10,964 targets), synthetic injections. **`feature_matrix.csv` is stale (39 rows) — full re-extraction on the ~2,300 detrended curves is the next compute step.**
 
 **Bottom line**: the hard, novel astrophysics engineering (data acquisition semantics, quality gating, GPU-accelerated feature extraction) is the part that's done. The parts every ML-in-production system needs (classification, uncertainty quantification, reporting, orchestration, UI) are the part that's *not* done. That is actually the favorable order to be in.
 
@@ -308,9 +308,47 @@ Keep GPU nodes **scale-to-zero** outside active jobs at every stage before Phase
 
 ## 14. Immediate Next Steps (30/60/90)
 
-- **Next 30 days**: finish `detection.py`, `classifier.py` — get to a locally-runnable pipeline on Sector 1 that hits the accuracy criteria in `Implementation_Plan.md` §11. This is the single highest-leverage thing to do next; nothing above is sellable without it.
-- **Next 60 days**: `fitting.py`, `visualization.py`, `report.py`, `run_pipeline.py` complete; stand up a thin REST API (even without auth yet) that wraps the CLI as an async job with Postgres job tracking; start Phase 1 web app.
+*(Revised 2026-09-19 after data-collection work.)*
+
+- **Immediate (days)**: run feature extraction on the full detrended set with the fixed labels (`python src/features.py --label-csv data/catalogs/unified_labels.csv --no-resume --n-jobs 4`); finish the TLS inject-recover validation on the regenerated synthetics; write unit tests for the four bug classes fixed so far (label normalization, upper-only clip, TLS depth semantics, injection detectability).
+- **Next 30 days**: `classifier.py` (XGBoost/LightGBM, SMOTE/class weights, calibration, SHAP), split **by TIC ID** (never by row), synthetics used for training only; learning curve to decide whether to download beyond ~2,300 targets. Add per-target download timeouts.
+- **Next 60 days**: `fitting.py`, `visualization.py`, `report.py`, `run_pipeline.py` complete; thin REST API wrapping the CLI as an async job with Postgres job tracking; start Phase 1 web app (replacing the static dashboard prototype).
 - **Next 90 days**: recruit 5–10 pilot users from personal/academic network, run them through the hosted MVP, and use their feedback to decide whether Phase 2 (real multi-tenancy + billing investment) is justified before building it.
+
+---
+
+## Appendix A — Implementation Progress Log
+
+### A.1 Delivered
+1. **Data acquisition**: threaded downloads (concurrency 8, staggered starts, exponential backoff + jitter, 429-aware), lightkurve cache-poisoning recovery, catalogs auto-downloaded on first run, unified label catalog (priority nasa_confirmed > exofop_toi > spoc_tce), manifest merge/resume, label-driven sampling interleaved across classes so any prefix is balanced.
+2. **Speedups**: vectorized phase folding (bincount, ~6× on CPU, bit-exact), vectorized gap detection (~41×).
+3. **macOS support**: `requirements-macos.txt`, persistent `.venv`, verified against live MAST.
+4. **Dashboard prototype**: `frontend/transit_log.html` (animated light-curve "Transit Log", published as an artifact).
+5. **`detection.py`**: TLS extracted from `features.py` into its own stage with candidate thresholds.
+
+### A.2 Bugs found and fixed (root causes)
+| # | Bug | Effect | Fix |
+|---|---|---|---|
+| 1 | TLS `results.depth` is the flux *level*, not the dip | every `depth_ppm` ≈ 99% | use `1 - r.depth`; prefer `r.rp_rs` |
+| 2 | Feature CSV append + schema drift | duplicated/misaligned rows | `mode="w"` on first write, NaN-filled TLS-series keys, canonical column reindex |
+| 3 | Label lookup keyed on `TIC_123` vs catalog `123` | real-target labels ≈ all -1 | normalized IDs; SYN labels auto-merged from `synthetic_injections.csv` |
+| 4 | Non-transiting synthetic injections (b > 1+rp) | byte-identical copies of host labeled as transits | rejection sampling verified against the batman model output |
+| 5 | Undetectable injections (period > baseline/3, SNR < 8) | mislabeled positives (single-transit or buried) | cap period at baseline/3; require SNR ≥ 8 vs host noise; use label-3 hosts |
+| 6 | Symmetric 3σ sigma-clip before detrending | **deleted transits** (synthetic and real) | upper-only clip |
+| 7 | TLS kwargs `minimum_period/maximum_period` | silently ignored → default search range | `period_min/period_max` |
+| 8 | Quality gate `5×1/√(30N)` proxy | rejected ~40% of targets; 47% of planet-class vs 25% of non-planet | robust (MAD) scatter ceiling of 2% (~10% rejected) |
+| 9 | Hung connections stalled the downloader | zero progress for ~10 min | restart under `caffeinate`; per-target timeout still to add |
+
+**Validation result**: TLS period recovery on synthetic injections went from 0/16 within 5% to 6/8 (partial run of the regenerated set; full result pending).
+
+### A.3 Dataset snapshot (2026-09-19)
+Real light curves 2,360 (usable 2,120: 1,423 label 0 / 697 label 3); synthetic 199 (192 usable); label catalog 10,964 unique targets. Download stopped early at ~3,200 of 5,000 requested targets because of network-limited throughput (~3–6 targets/min); resumable.
+
+### A.4 Known open items
+- Feature matrix not yet regenerated for the full set; classifier/fitting/visualization/report/pipeline entrypoint still unwritten.
+- Full inject-recover TLS validation and unit tests outstanding.
+- Remaining ~28% download failures are mostly targets with no SPOC 2-min data (FFI-only), not fixable in this pipeline.
+- Auto-commits ("done", "Done: …") appear in git history from an unidentified source; no hook was found.
 
 ---
 
