@@ -323,10 +323,17 @@ def plot_corner_image(res, samples) -> Optional[np.ndarray]:
     data = np.column_stack([(samples[:, 0] - tc0) * 1440.0, (samples[:, 1] - P0) * 86400.0,
                             samples[:, 2], samples[:, 3], np.exp(samples[:, 4])])
     labels = ["T$_c$ − %.4f\n(min)" % tc0, "P − %.5f\n(s)" % P0, "Rp/R*", "b", "a/R*"]
-    fig = corner.corner(data, labels=labels, quantiles=[0.1587, 0.5, 0.8413], show_titles=True,
-                        title_fmt=".4g", title_kwargs={"fontsize": 7}, label_kwargs={"fontsize": 8},
-                        color=NAVY, plot_datapoints=False, fill_contours=True, levels=(0.68, 0.95),
-                        hist_kwargs={"color": NAVY})
+    # A least-squares fallback with no usable covariance leaves identical samples: nothing to plot.
+    if len(data) < 50 or not np.all(np.ptp(data, axis=0) > 0):
+        return None
+    try:
+        fig = corner.corner(data, labels=labels, quantiles=[0.1587, 0.5, 0.8413], show_titles=True,
+                            title_fmt=".4g", title_kwargs={"fontsize": 7}, label_kwargs={"fontsize": 8},
+                            color=NAVY, plot_datapoints=False, fill_contours=True, levels=(0.68, 0.95),
+                            hist_kwargs={"color": NAVY})
+    except Exception as e:                                         # noqa: BLE001
+        log.warning("corner plot skipped for %s (%s)", res.get("tic_id"), e)
+        return None
     for a in fig.axes:
         a.tick_params(labelsize=6)
     buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=130, bbox_inches="tight"); plt.close(fig)
@@ -338,7 +345,8 @@ def plot_corner(ax, img):
     ax.set_title("4 · MCMC posterior")
     ax.axis("off")
     if img is None:
-        ax.text(0.5, 0.5, "No posterior samples", ha="center", transform=ax.transAxes)
+        ax.text(0.5, 0.5, "Posterior corner plot not available\n(no samples, or least-squares fallback\nwith no usable covariance)",
+                ha="center", va="center", transform=ax.transAxes, fontsize=8, color=GREY)
     else:
         ax.imshow(img)
 
