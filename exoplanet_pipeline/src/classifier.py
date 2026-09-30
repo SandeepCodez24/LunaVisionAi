@@ -140,6 +140,47 @@ def _warn_once(msg: str) -> None:
         log.warning(msg)
 
 
+_XGB_DEVICE: Optional[str] = None
+
+
+def _xgb_device() -> str:
+    """'cuda' if XGBoost can actually train on a GPU here, else 'cpu'.
+
+    Override with LUNA_XGB_DEVICE=cpu|cuda. The probe is cached, so it runs once.
+    """
+    global _XGB_DEVICE
+    if _XGB_DEVICE is None:
+        import os
+        forced = os.environ.get("LUNA_XGB_DEVICE", "").lower()
+        if forced in ("cpu", "cuda"):
+            _XGB_DEVICE = forced
+        else:
+            _XGB_DEVICE = "cpu"
+            try:
+                import xgboost as xgb
+                # A CPU-only XGBoost build doesn't raise for device="cuda"; it warns and
+                # silently falls back, so treat any CUDA warning as "no GPU".
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    xgb.XGBClassifier(n_estimators=1, device="cuda", tree_method="hist").fit(
+                        np.random.rand(20, 3), np.tile([0, 1], 10))
+                if not any("cuda" in str(w.message).lower() for w in caught):
+                    _XGB_DEVICE = "cuda"
+            except Exception:                                # noqa: BLE001
+                pass
+        log.info("XGBoost device: %s", _XGB_DEVICE)
+    return _XGB_DEVICE
+
+
+def _xgb_to_cpu(model: "StackedClassifier") -> None:
+    """Make a GPU-trained XGBoost portable so the saved model also loads on CPU-only machines."""
+    est = model.base_.get("xgb")
+    if est is not None and hasattr(est, "named_steps"):     # SMOTE pipeline
+        est = est.named_steps["clf"]
+    if est is not None:
+        est.set_params(device="cpu")
+
+
 def make_base_learners(use_smote: bool = False, n_jobs: int = 2) -> dict:
     """Base learners; XGBoost/LightGBM only if their OpenMP runtime loads."""
     learners = {
@@ -152,7 +193,8 @@ def make_base_learners(use_smote: bool = False, n_jobs: int = 2) -> dict:
         import xgboost as xgb
         learners["xgb"] = xgb.XGBClassifier(
             n_estimators=500, max_depth=6, learning_rate=0.05, subsample=0.8,
-            colsample_bytree=0.8, eval_metric="logloss", n_jobs=n_jobs, random_state=SEED)
+            colsample_bytree=0.8, eval_metric="logloss", n_jobs=n_jobs, random_state=SEED,
+            tree_method="hist", device=_xgb_device())
     except Exception as e:                                   # noqa: BLE001
         _warn_once("XGBoost unavailable — install the OpenMP runtime: `brew install libomp`.")
     try:
@@ -191,6 +233,7 @@ class StackedClassifier:
 
     def fit(self, X: pd.DataFrame, y: np.ndarray, groups: np.ndarray):
         self.classes_ = np.unique(y)
+        y = np.searchsorted(self.classes_, y)     # contiguous 0..K-1 (XGBoost rejects gaps like [0, 3])
         self.feature_names_ = list(X.columns)
         proto = make_base_learners(self.use_smote, self.n_jobs)
         self.names_ = list(proto)
@@ -319,6 +362,7 @@ def train(features_csv: Path, out_dir: Path, use_smote=False, do_learning_curve=
         result["learning_curve"] = learning_curve(
             X, y, groups, is_syn, tr, te, use_smote=use_smote, n_jobs=n_jobs)
 
+    _xgb_to_cpu(model)                                       # after SHAP/eval; keeps the pickle portable
     out_dir.mkdir(parents=True, exist_ok=True)
     joblib.dump(model, out_dir / "classifier.joblib")
     (out_dir / "metrics.json").write_text(json.dumps(result, indent=2))
