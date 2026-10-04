@@ -55,7 +55,7 @@ app = FastAPI(title="LunaVisionAI", version="0.1.0", lifespan=lifespan)
 # ─────────────────────────────────────────────────────────────────────────────
 _table_lock = threading.Lock()
 _table: Optional[pd.DataFrame] = None
-_table_mtime = 0.0
+_table_key: tuple = ()
 _scoring_error: Optional[str] = None
 
 
@@ -79,11 +79,13 @@ def ok(payload, status: int = 200) -> JSONResponse:
 
 def get_table() -> pd.DataFrame:
     """Feature matrix with p_transit / predicted class, rebuilt when the CSV changes."""
-    global _table, _table_mtime, _scoring_error
+    global _table, _table_key, _scoring_error
     path = CATALOGS / "feature_matrix.csv"
     with _table_lock:
-        mt = path.stat().st_mtime
-        if _table is None or mt != _table_mtime:
+        mt = tuple(p.stat().st_mtime if p.exists() else 0.0 for p in
+                   (path, ps.MODEL_PATH, ps.MODELS_DIR / "split.json", ps.MODELS_DIR / "metrics.json"))
+        if _table is None or mt != _table_key:
+            ps._model = None                                             # pick up a retrained model
             df = pd.read_csv(path)
             df = df[df["status"].astype(str).eq("done")].copy()
             df["tic_id"] = df["tic_id"].map(ps.norm_tic)
@@ -97,7 +99,9 @@ def get_table() -> pd.DataFrame:
                 _scoring_error = f"{type(e).__name__}: {e}"
                 df["p_transit"] = np.nan
                 df["pred"] = np.nan
-            _table, _table_mtime = df.reset_index(drop=True), mt
+                df["detected"] = df["period"].notna()
+            df["split"] = df["tic_id"].map(ps.split_of)
+            _table, _table_key = df.reset_index(drop=True), mt
         return _table
 
 
@@ -106,7 +110,9 @@ def _row_summary(r: pd.Series) -> dict:
         "tic_id": r["tic_id"], "kind": r["kind"],
         "label": None if pd.isna(r["label"]) else int(r["label"]),
         "label_name": LABEL_NAMES.get(int(r["label"])) if pd.notna(r["label"]) and r["label"] >= 0 else None,
-        "pred": None if pd.isna(r.get("pred")) else LABEL_NAMES.get(int(r["pred"])),
+        "pred": (LABEL_NAMES.get(int(r["pred"])) if pd.notna(r.get("pred")) else
+                 "No detection" if not r.get("detected", True) else None),
+        "detected": bool(r.get("detected", True)), "split": r.get("split"),
         "p_transit": r.get("p_transit"), "period": r.get("period"), "depth_ppm": r.get("depth_ppm"),
         "duration_hr": r.get("duration_hr"), "SDE": r.get("SDE"), "SNR": r.get("SNR"),
         "sector": None if pd.isna(r.get("sector")) else int(r["sector"]),
@@ -126,7 +132,7 @@ def overview():
     df = get_table()
     real = df[df["kind"] == "real"]
     metrics = {}
-    mp = BASE_DIR / "models" / "metrics.json"
+    mp = ps.MODELS_DIR / "metrics.json"
     if mp.exists():
         metrics = json.loads(mp.read_text())
     by_label = {LABEL_NAMES.get(int(k), str(k)): int(v) for k, v in real["label"].value_counts().items()}
@@ -135,6 +141,9 @@ def overview():
         "synthetic": int((df["kind"] == "synthetic").sum()),
         "candidates": int((real["p_transit"] >= 0.5).sum()) if real["p_transit"].notna().any() else None,
         "by_label": by_label,
+        "split": {"status": "valid" if ps.load_split() else "unknown",
+                  "held_out": int((df["split"] == "held-out").sum()), "trained_on": int((df["split"] == "trained-on").sum())},
+        "no_detection": int((~df["detected"]).sum()) if "detected" in df else None,
         "model": {"test": metrics.get("test"), "top_features": metrics.get("top_features"),
                   "base_learners": metrics.get("base_learners"), "n_features": metrics.get("n_features")},
         "scoring_error": _scoring_error,
@@ -143,7 +152,7 @@ def overview():
 
 @app.get("/api/targets")
 def targets(q: str = "", kind: str = "real", label: Optional[int] = None,
-            min_p: float = Query(0.0, ge=0, le=1),
+            min_p: float = Query(0.0, ge=0, le=1), split: Optional[str] = None,
             sort: str = "p_transit", order: str = "desc",
             limit: int = Query(40, ge=1, le=200), offset: int = Query(0, ge=0)):
     df = get_table()
@@ -154,6 +163,8 @@ def targets(q: str = "", kind: str = "real", label: Optional[int] = None,
     if q.strip():
         needle = re.sub(r"\D", "", q) or q.strip().upper()
         df = df[df["tic_id"].str.contains(needle, case=False, regex=False)]
+    if split in ("held-out", "trained-on"):
+        df = df[df["split"] == split]
     if min_p > 0:
         df = df[df["p_transit"] >= min_p]
     if sort not in ("p_transit", "SDE", "SNR", "period", "depth_ppm", "duration_hr", "tic_id"):
@@ -174,7 +185,7 @@ def target_detail(tic: str):
         if saved is None:
             raise HTTPException(404, f"{t} is not in the feature table and has no saved analysis")
         return ok({**saved, "label": None, "label_name": None, "sector": saved["lightcurve"].get("sector"),
-                   "pred": saved.get("pred"), "has_report": False})
+                   "split": ps.split_of(t), "has_report": False})
     r = hit.iloc[0]
     try:
         lc = ps.lightcurve_payload(t)

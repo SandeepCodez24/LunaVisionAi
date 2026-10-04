@@ -1,7 +1,7 @@
 (function () {
   "use strict";
   const $ = (s) => document.querySelector(s);
-  const { api, num, pct, esc, countUp, Chart, gauge, bars, tag } = LV;
+  const { api, num, pct, esc, countUp, Chart, gauge, bars, tag, splitTag, SPLIT } = LV;
 
   /* ── Hero: planet crosses the star, the light curve dips in sync ───────── */
   (function heroScene() {
@@ -69,6 +69,10 @@
       countUp($("#sAuc"), t && t.roc_auc, { decimals: 3 });
     }), { threshold: 0.3 });
     io.observe($(".stats"));
+    const sp = o.split || {}, note = $("#splitNote");
+    note.innerHTML = sp.status === "valid"
+      ? `<b>${sp.held_out.toLocaleString()}</b> stars were held out from training and <b>${sp.trained_on.toLocaleString()}</b> were trained on. Scores for trained-on stars are optimistic; use <b>Held-out only</b> for honest ones.`
+      : `<b>Held-out stars aren't recorded for this model</b>, so we can't say which scores are honest. Retrain (<code>python src/classifier.py</code>) to enable it.` + (o.no_detection ? ` ${o.no_detection} stars with no transit detection show "no detection" instead of a score.` : "");
     if (o.scoring_error) $("#count").textContent = "Classifier unavailable: " + o.scoring_error;
     if (!t) return;
 
@@ -82,6 +86,19 @@
       m.map((row, i) => `<span>true ${labs[i]}</span>` + row.map((v, j) => `<div class="cell" style="--a:${(0.08 + 0.7 * v / max).toFixed(2)};transition-delay:${(i * 2 + j) * 120}ms">${v}</div>`).join("")).join("");
     $("#cm").closest(".card").addEventListener("revealed", () => $("#cm").classList.add("in"), { once: true });
 
+    const cal = t.calibration, calNote = $("#calNote");
+    if (!cal) { calNote.textContent = "Calibration is measured at training time. It will appear after the next training run."; $("#cCal").style.display = "none"; }
+    else {
+      calNote.innerHTML = `Points on the diagonal mean the score equals the observed rate. Expected calibration error <b>${cal.ece.toFixed(3)}</b>; base rate of planet-side stars in the held-out set is <b>${pct(cal.base_rate)}</b>.`;
+      const ch = new Chart($("#cCal"), { pad: { l: 52, r: 14, t: 12, b: 34 }, xLabel: "model score (predicted)" });
+      const pts = cal.bins.map((b) => [b.mean_pred, b.frac_pos]);
+      ch.setData({ xDomain: [0, 1], yDomain: [0, 1], layers: [
+        { type: "line", pts: [[0, 0], [1, 1]], color: "rgba(168,166,189,.45)", width: 1 },
+        { type: "line", pts, color: "#ffd88a", width: 2.2, glow: true },
+        { type: "scatter", pts, color: "#d99a35", size: 7, alpha: 1 }] });
+      $("#cCal").closest(".card").addEventListener("revealed", () => ch.animate(1600), { once: true });
+    }
+
     const tf = (o.model.top_features || []).slice(0, 8), top = Math.max(...tf.map((f) => f.shap || f.permutation || 0)) || 1;
     $("#feats").innerHTML = tf.map((f) => { const v = f.shap ?? f.permutation ?? 0;
       return `<div class="feat-row"><span>${esc(f.feature)}</span><div class="track" style="height:8px;border-radius:99px;background:var(--surface-2);overflow:hidden"><div class="fillb" data-w="${(v / top * 100).toFixed(1)}" style="height:100%;width:0;background:var(--accent);border-radius:99px;transition:width 1.2s var(--ease)"></div></div><span>${v.toFixed(3)}</span></div>`; }).join("");
@@ -89,35 +106,37 @@
   }
 
   /* ── Candidate explorer ────────────────────────────────────────────────── */
-  const state = { q: "", label: "", min: 0, sort: "p_transit", order: "desc", offset: 0, limit: 25, total: 0 };
+  const state = { q: "", label: "", split: "", min: 0, sort: "p_transit", order: "desc", offset: 0, limit: 25, total: 0 };
   let reqId = 0, debounce;
   function rowHtml(r, i) {
     const p = r.p_transit;
     return `<tr data-tic="${esc(r.tic_id)}" style="animation-delay:${i * 28}ms" tabindex="0">
-      <td class="tic">${esc(r.tic_id.replace("TIC_", ""))}</td><td>${tag(r.label_name)}</td>
-      <td><div class="pbar"><div class="track"><div class="fillb" style="--w:${p == null ? 0 : (p * 100).toFixed(1)}%"></div></div><span class="mono">${pct(p)}</span></div></td>
+      <td class="tic">${esc(r.tic_id.replace("TIC_", ""))}</td><td>${tag(r.label_name)}</td><td>${splitTag(r.split)}</td>
+      <td>${p == null && r.detected === false ? '<span class="nodet">no detection</span>' : `<div class="pbar"><div class="track"><div class="fillb" style="--w:${p == null ? 0 : (p * 100).toFixed(1)}%"></div></div><span class="mono">${pct(p)}</span></div>`}</td>
       <td>${num(r.period, 3)}</td><td>${num(r.depth_ppm, 0)}</td><td>${num(r.SDE, 1)}</td></tr>`;
   }
   async function loadRows(append) {
     const id = ++reqId;
-    if (!append) { state.offset = 0; $("#rows").innerHTML = '<tr class="skeleton"><td colspan="6"></td></tr>'.repeat(5); }
+    if (!append) { state.offset = 0; $("#rows").innerHTML = '<tr class="skeleton"><td colspan="7"></td></tr>'.repeat(5); }
     const qs = new URLSearchParams({ q: state.q, min_p: state.min, sort: state.sort, order: state.order, limit: state.limit, offset: state.offset });
     if (state.label !== "") qs.set("label", state.label);
+    if (state.split) qs.set("split", state.split);
     try {
       const d = await api("/api/targets?" + qs);
       if (id !== reqId) return;
       state.total = d.total;
       const html = d.items.map((r, i) => rowHtml(r, i)).join("");
-      if (append) $("#rows").insertAdjacentHTML("beforeend", html); else $("#rows").innerHTML = html || '<tr><td colspan="6" class="muted" style="text-align:center;padding:32px">No matching stars.</td></tr>';
+      if (append) $("#rows").insertAdjacentHTML("beforeend", html); else $("#rows").innerHTML = html || '<tr><td colspan="7" class="muted" style="text-align:center;padding:32px">No matching stars.</td></tr>';
       const shown = $("#rows").querySelectorAll("tr[data-tic]").length;
       $("#count").textContent = `${shown.toLocaleString()} of ${d.total.toLocaleString()} stars`;
       $("#more").hidden = shown >= d.total;
-    } catch (e) { if (id === reqId) $("#rows").innerHTML = `<tr><td colspan="6"><div class="error-box">${esc(e.message)}</div></td></tr>`; }
+    } catch (e) { if (id === reqId) $("#rows").innerHTML = `<tr><td colspan="7"><div class="error-box">${esc(e.message)}</div></td></tr>`; }
   }
   $("#rows").addEventListener("click", (e) => { const tr = e.target.closest("tr[data-tic]"); if (tr) location.href = "/target?tic=" + tr.dataset.tic; });
   $("#rows").addEventListener("keydown", (e) => { if (e.key === "Enter") { const tr = e.target.closest("tr[data-tic]"); if (tr) location.href = "/target?tic=" + tr.dataset.tic; } });
   $("#q").addEventListener("input", (e) => { clearTimeout(debounce); debounce = setTimeout(() => { state.q = e.target.value.trim(); loadRows(); }, 250); });
   $("#fLabel").addEventListener("change", (e) => { state.label = e.target.value; loadRows(); });
+  $("#fSplit").addEventListener("change", (e) => { state.split = e.target.value; loadRows(); });
   $("#fMin").addEventListener("input", (e) => { state.min = +e.target.value; $("#fMinVal").textContent = Math.round(state.min * 100) + "%"; clearTimeout(debounce); debounce = setTimeout(() => loadRows(), 200); });
   $("#more").addEventListener("click", () => { state.offset += state.limit; loadRows(true); });
   document.querySelectorAll("th[data-sort]").forEach((th) => th.addEventListener("click", () => {

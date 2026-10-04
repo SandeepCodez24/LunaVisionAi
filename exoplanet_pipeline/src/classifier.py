@@ -26,6 +26,7 @@ CLI
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import warnings
@@ -125,6 +126,32 @@ def group_split(y, groups, is_syn, test_size=0.25, seed=SEED):
     train_mask = ~np.isin(groups, test_groups)
     assert not (set(groups[train_mask]) & set(groups[test_mask])), "group leakage"
     return np.where(train_mask)[0], np.where(test_mask)[0]
+
+
+def split_manifest(groups, is_syn, tr, te, n_rows: int) -> dict:
+    """Which real stars were held out vs trained on, so the UI can say whether a score is honest."""
+    tid = lambda g: "TIC_" + str(g)                                   # noqa: E731 — groups hold bare TIC numbers
+    real_tr = sorted({tid(g) for g in groups[tr][~is_syn[tr]]})
+    test = sorted({tid(g) for g in groups[te]})
+    split_id = hashlib.sha1(("|".join(test) + "#" + "|".join(real_tr)).encode()).hexdigest()[:12]
+    return {"split_id": split_id, "seed": SEED, "n_rows": int(n_rows), "test": test, "train": real_tr}
+
+
+def calibration_bins(y_pos, p, n_bins: int = 10) -> dict:
+    """Reliability table: in each probability bin, mean predicted P vs observed positive rate, plus ECE."""
+    y_pos, p = np.asarray(y_pos, float), np.asarray(p, float)
+    edges = np.linspace(0, 1, n_bins + 1)
+    idx = np.clip(np.digitize(p, edges[1:-1]), 0, n_bins - 1)
+    bins, ece = [], 0.0
+    for b in range(n_bins):
+        m = idx == b
+        if not m.any():
+            continue
+        mp, fp = float(p[m].mean()), float(y_pos[m].mean())
+        bins.append({"lo": float(edges[b]), "hi": float(edges[b + 1]), "n": int(m.sum()),
+                     "mean_pred": mp, "frac_pos": fp})
+        ece += m.mean() * abs(mp - fp)
+    return {"bins": bins, "ece": float(ece), "base_rate": float(y_pos.mean())}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -291,7 +318,8 @@ def evaluate(model: StackedClassifier, X, y) -> dict:
         out.update(positive_class=int(model.classes_[pi]),
                    roc_auc=float(roc_auc_score(yb, p1)),
                    pr_auc=float(average_precision_score(yb, p1)),
-                   brier=float(brier_score_loss(yb, p1)))
+                   brier=float(brier_score_loss(yb, p1)),
+                   calibration=calibration_bins(yb, p1))
     elif len(np.unique(y)) == len(model.classes_):
         out["roc_auc_ovr"] = float(roc_auc_score(y, proba, multi_class="ovr"))
     return out
@@ -364,6 +392,9 @@ def train(features_csv: Path, out_dir: Path, use_smote=False, do_learning_curve=
 
     _xgb_to_cpu(model)                                       # after SHAP/eval; keeps the pickle portable
     out_dir.mkdir(parents=True, exist_ok=True)
+    manifest = split_manifest(groups, is_syn, tr, te, len(y))
+    result["split_id"] = manifest["split_id"]               # ties metrics.json to split.json (see pipeline_service.load_split)
+    (out_dir / "split.json").write_text(json.dumps(manifest))
     joblib.dump(model, out_dir / "classifier.joblib")
     (out_dir / "metrics.json").write_text(json.dumps(result, indent=2))
     log.info("Saved %s and metrics.json", out_dir / "classifier.joblib")

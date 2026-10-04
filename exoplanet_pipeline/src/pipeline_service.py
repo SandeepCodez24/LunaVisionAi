@@ -11,7 +11,9 @@ Stage code is reused as-is: preprocessing.preprocess_one, features.extract_featu
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import sys
 import threading
 from pathlib import Path
@@ -27,7 +29,8 @@ if str(_SRC) not in sys.path:
 BASE_DIR = _SRC.parent
 RAW_DIR = BASE_DIR / "data" / "processed" / "lc_raw"
 DETRENDED_DIR = BASE_DIR / "data" / "processed" / "lc_detrended"
-MODEL_PATH = BASE_DIR / "models" / "classifier.joblib"
+MODELS_DIR = Path(os.environ.get("LUNA_MODELS_DIR", BASE_DIR / "models"))
+MODEL_PATH = MODELS_DIR / "classifier.joblib"
 ANALYSES_DIR = BASE_DIR / "outputs" / "analyses"
 
 log = logging.getLogger(__name__)
@@ -64,7 +67,13 @@ def get_model():
 
 
 def score_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """Per-class probabilities for feature rows. Returns columns p_<class>, p_transit, pred."""
+    """
+    Per-class probabilities for feature rows: columns p_<class>, p_transit, pred, detected.
+
+    Stars where TLS found no period get NO score (NaN). Only a handful of training stars had no
+    detection and almost all were planet-side, so the model learned "no detection => Transit" (~0.93),
+    which is an artifact, not evidence.
+    """
     model = get_model()
     X = df.reindex(columns=model.feature_names_)
     proba = model.predict_proba(X)
@@ -72,8 +81,49 @@ def score_rows(df: pd.DataFrame) -> pd.DataFrame:
     for i, c in enumerate(model.classes_):
         out[f"p_{int(c)}"] = proba[:, i]
     out["p_transit"] = out["p_0"] if "p_0" in out else np.nan
-    out["pred"] = [int(model.classes_[k]) for k in np.argmax(proba, axis=1)]
+    out["pred"] = [float(model.classes_[k]) for k in np.argmax(proba, axis=1)]
+    detected = pd.to_numeric(df.get("period"), errors="coerce").notna().to_numpy() if "period" in df else np.zeros(len(df), bool)
+    out["detected"] = detected
+    undetected = ~detected
+    score_cols = [c for c in out.columns if c.startswith("p_")] + ["pred"]
+    out.loc[undetected, score_cols] = np.nan
     return out
+
+
+_split_cache: dict = {"key": None, "val": None}
+
+
+def load_split() -> Optional[dict]:
+    """
+    The train/held-out star lists, but only if they belong to the loaded model: split.json and
+    metrics.json must carry the same split_id. Models trained before this existed have none, and
+    then we say "unknown" rather than guess which stars were held out.
+    """
+    sp, mp = MODELS_DIR / "split.json", MODELS_DIR / "metrics.json"
+    if not (sp.exists() and mp.exists()):
+        return None
+    key = (sp.stat().st_mtime, mp.stat().st_mtime)
+    if _split_cache["key"] != key:
+        val = None
+        try:
+            manifest, metrics = json.loads(sp.read_text()), json.loads(mp.read_text())
+            if manifest.get("split_id") and manifest["split_id"] == metrics.get("split_id"):
+                val = {"id": manifest["split_id"], "test": set(manifest["test"]), "train": set(manifest["train"])}
+        except Exception:                                            # noqa: BLE001
+            val = None
+        _split_cache.update(key=key, val=val)
+    return _split_cache["val"]
+
+
+def split_of(tic: str) -> str:
+    """held-out | trained-on | unseen (not in the model's split) | synthetic | unknown (no valid split)."""
+    t = norm_tic(tic)
+    if t.startswith("SYN_"):
+        return "synthetic"
+    sp = load_split()
+    if sp is None:
+        return "unknown"
+    return "held-out" if t in sp["test"] else "trained-on" if t in sp["train"] else "unseen"
 
 
 def lightcurve_payload(tic: str, max_points: int = 900, fold_bins: int = 160) -> dict:
@@ -249,7 +299,8 @@ def run_target(tic_id: str, on_stage: Optional[Callable[[str, str, dict], None]]
     # 4. classify
     emit("classify", "start", {})
     scores = score_rows(pd.DataFrame([row])).iloc[0].to_dict()
-    emit("classify", "done", {"p_transit": _clean(scores.get("p_transit"))})
+    detected = bool(scores.get("detected"))
+    emit("classify", "done", {"p_transit": _clean(scores.get("p_transit")), "detected": detected})
 
     # 5. finalize: plot payloads
     emit("finalize", "start", {})
@@ -257,15 +308,15 @@ def run_target(tic_id: str, on_stage: Optional[Callable[[str, str, dict], None]]
     t_raw, f_raw = lc.pop("_raw")
     fold = fold_payload(t_raw, f_raw, float(row.get("period", np.nan)), float(row.get("t0", np.nan)),
                         dur_hr=float(row.get("duration_hr", np.nan)))
-    probs = {CLASS_NAMES[int(k[2:])]: _clean(v) for k, v in scores.items()
-             if k.startswith("p_") and k[2:].isdigit()}
+    probs = ({CLASS_NAMES[int(k[2:])]: _clean(v) for k, v in scores.items() if k.startswith("p_") and k[2:].isdigit()}
+             if detected else {})
     result = {
-        "tic_id": tic, "source": source,
+        "tic_id": tic, "source": source, "detected": detected, "split": split_of(tic),
         "kind": "upload" if tic.startswith("UPL_") else "synthetic" if tic.startswith("SYN_") else "real",
-        "pred": CLASS_NAMES.get(int(scores["pred"]), str(scores["pred"])),
-        "p_transit": _clean(scores.get("p_transit")),
+        "pred": CLASS_NAMES.get(int(scores["pred"]), str(scores["pred"])) if detected else "No detection",
+        "p_transit": _clean(scores.get("p_transit")) if detected else None,
         "probabilities": probs,
-        "is_candidate": bool((scores.get("p_transit") or 0) >= 0.5),
+        "is_candidate": bool(detected and (scores.get("p_transit") or 0) >= 0.5),
         "features": clean_row({k: row.get(k) for k in (
             "period", "t0", "depth_ppm", "duration_hr", "SDE", "SNR", "FAP", "transit_count",
             "rp_rs", "odd_even_ratio", "secondary_ratio", "centroid_proxy",

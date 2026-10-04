@@ -1,7 +1,7 @@
 (function () {
   "use strict";
   const $ = (s) => document.querySelector(s);
-  const { api, num, esc, Chart, gauge, bars, tag, countUp } = LV;
+  const { api, num, esc, Chart, gauge, bars, tag, countUp, splitTag, SPLIT } = LV;
 
   const FEATS = [
     ["period", "Period (d)", 3], ["duration_hr", "Duration (h)", 2], ["depth_ppm", "Depth (ppm)", 0],
@@ -24,7 +24,15 @@
     $("#tags").innerHTML = `${tag(d.label_name) .replace('class="tag', 'title="Catalog label" class="tag')}${d.pred ? `<span class="tag" title="Classifier prediction">model: ${esc(d.pred)}</span>` : ""}`;
     if (d.has_report) { const a = $("#pdf"); a.hidden = false; a.href = `/api/targets/${d.tic_id}/report`; }
 
-    gauge($("#gauge"), d.p_transit); bars($("#probs"), d.probabilities);
+    const sn = $("#splitNote"), m = SPLIT[d.split];
+    if (d.kind !== "synthetic" && (m || d.detected === false)) {
+      sn.hidden = false; sn.classList.toggle("warn", d.split === "trained-on");
+      sn.innerHTML = (d.detected === false ? "<b>No transit detected</b>: the search found no significant period, so the model gives no score for this star. " : "") +
+        (m && d.detected !== false ? `<b>${esc(m.label)}.</b> ${esc(m.note)} ` : "") +
+        (d.detected === false ? "" : `<span class="muted">The score is how much the features resemble catalog planet-side stars, not the probability of a planet.</span>`);
+    }
+    if (d.split) $("#tags").insertAdjacentHTML("beforeend", splitTag(d.split));
+    gauge($("#gauge"), d.p_transit, d.detected === false ? "no detection" : "model score"); bars($("#probs"), d.probabilities);
 
     $("#feats").innerHTML = FEATS.map(([k, label, dec]) => {
       const v = d.features[k]; return `<div class="feat"><b data-k="${k}" data-v="${v ?? ""}" data-d="${dec}">${v == null ? "—" : "0"}</b><span>${label}</span></div>`;
