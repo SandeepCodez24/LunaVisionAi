@@ -3,3 +3,4 @@ __pycache__/
 *.pyc
 .DS_Store
 exoplanet_pipeline/data/processed/
+exoplanet_pipeline/outputs/

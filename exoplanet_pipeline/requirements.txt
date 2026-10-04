@@ -37,3 +37,8 @@ lightgbm
 imbalanced-learn    # optional SMOTE (--smote)
 optuna              # hyperparameter search
 shap                # feature attributions
+
+# Web API (api/main.py) — run: uvicorn api.main:app
+fastapi
+uvicorn[standard]
+httpx          # only for TestClient-based tests
