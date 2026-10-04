@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LunaVisionAI</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,500;1,9..144,500&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500&display=swap">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<canvas id="starfield" aria-hidden="true"></canvas>
+
+<header class="nav"><div class="wrap">
+  <a class="brand" href="/"><span class="brand-mark"></span>LunaVisionAI</a>
+  <nav class="nav-links">
+    <a href="#analyze">Analyze</a><a href="#candidates">Candidates</a><a href="#model">Model</a><a href="/log">Transit log</a>
+  </nav>
+</div></header>
+
+<main class="wrap">
+
+  <section class="hero">
+    <div>
+      <span class="eyebrow">TESS · Transit detection &amp; vetting</span>
+      <h1>Watch distant stars <em>dim.</em></h1>
+      <p>Every dip in a star's light is a question. LunaVisionAI searches TESS light curves for planetary transits, scores each candidate with a calibrated classifier, and shows its work.</p>
+      <div class="cta">
+        <a class="btn primary" href="#analyze">Analyze a star →</a>
+        <a class="btn" href="#candidates">Browse candidates</a>
+      </div>
+    </div>
+    <div class="scene reveal" data-d="2">
+      <canvas id="heroScene" aria-label="A planet crossing a star while its light curve dips"></canvas>
+      <div class="scene-cap"><span>SIMULATED TRANSIT</span><span id="sceneReadout">flux 1.0000</span></div>
+    </div>
+  </section>
+
+  <div class="stats reveal">
+    <div class="stat"><b id="sTotal">—</b><span>Light curves processed</span></div>
+    <div class="stat"><b id="sReal">—</b><span>Real TESS stars</span></div>
+    <div class="stat"><b id="sCand">—</b><span>Scored P(transit) ≥ 50%</span></div>
+    <div class="stat"><b id="sAuc">—</b><span>Held-out ROC-AUC</span></div>
+  </div>
+
+  <!-- Analyze -->
+  <section class="block" id="analyze">
+    <div class="sec-head reveal">
+      <div><span class="eyebrow">Run the pipeline</span><h2>Analyze a star</h2>
+      <p>Enter a TIC ID. The server runs transit search, feature extraction and classification, and streams each stage as it happens.</p></div>
+    </div>
+    <div class="console">
+      <div class="card reveal">
+        <div class="tabs" role="tablist">
+          <button class="tab active" role="tab" data-pane="paneTic" type="button">TIC ID</button>
+          <button class="tab" role="tab" data-pane="paneUpload" type="button">Upload file</button>
+        </div>
+        <div id="paneTic">
+          <form class="field" id="jobForm">
+            <input id="ticInput" inputmode="numeric" autocomplete="off" placeholder="e.g. 307210830" aria-label="TIC ID">
+            <button class="btn primary" id="runBtn" type="submit">Run</button>
+          </form>
+          <p class="note" style="margin:0 0 12px">Stars not yet on the server are downloaded live from MAST (SPOC 2-minute data).</p>
+          <div class="chips" id="samples" aria-label="Sample stars"></div>
+        </div>
+        <div id="paneUpload" hidden>
+          <label class="drop" id="drop" tabindex="0">
+            <input type="file" id="fileInput" accept=".csv,.txt,.tsv,.fits,.fit,.fz,.gz" hidden>
+            <span class="drop-icon">⇪</span><b>Drop a light curve here</b>
+            <span>or click to choose · CSV with <code>time</code> and <code>flux</code> columns, or a TESS FITS file · max 40 MB</span>
+          </label>
+        </div>
+        <div id="recentWrap" hidden><span class="eyebrow">Recent analyses</span><div class="chips" id="recent" style="margin-top:10px"></div></div>
+        <ol class="stepper" id="stepper"><div class="fill" id="stepFill"></div></ol>
+      </div>
+      <div class="card result reveal" data-d="1" id="result">
+        <div class="placeholder"><span>◌</span><span>Results appear here.<br>Pick a sample star or enter a TIC ID.</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Candidates -->
+  <section class="block" id="candidates">
+    <div class="sec-head reveal">
+      <div><span class="eyebrow">Explore</span><h2>Candidate explorer</h2>
+      <p>Real TESS stars ranked by the classifier's transit probability. Click a row for the full light curve and phase fold.</p></div>
+    </div>
+    <div class="filters reveal">
+      <input type="search" id="q" placeholder="Search TIC…" aria-label="Search TIC">
+      <select id="fLabel" aria-label="Catalog label"><option value="">All catalog labels</option><option value="0">Transit (catalog)</option><option value="3">Other (catalog)</option></select>
+      <label>min P(transit) <input type="range" id="fMin" min="0" max="0.95" step="0.05" value="0"><b id="fMinVal" class="mono">0%</b></label>
+    </div>
+    <div class="table-card reveal">
+      <table>
+        <thead><tr>
+          <th data-sort="tic_id">TIC</th><th>Catalog</th><th data-sort="p_transit" class="sorted">P(transit)</th>
+          <th data-sort="period">Period (d)</th><th data-sort="depth_ppm">Depth (ppm)</th><th data-sort="SDE">SDE</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <div class="table-foot"><span id="count">—</span><button class="btn" id="more" hidden>Load more</button></div>
+    </div>
+    <p class="note">Scores for stars the model trained on are optimistic. For honest accuracy, use the held-out metrics below.</p>
+  </section>
+
+  <!-- Model -->
+  <section class="block" id="model">
+    <div class="sec-head reveal">
+      <div><span class="eyebrow">Under the hood</span><h2>Model performance</h2>
+      <p>Stacked XGBoost, LightGBM and HistGradientBoosting with Platt calibration, evaluated on stars held out by TIC ID.</p></div>
+    </div>
+    <div class="metric-grid reveal" id="metrics"></div>
+    <div class="two">
+      <div class="card reveal"><h3 class="eyebrow" style="margin-bottom:16px">Confusion matrix · held-out</h3><div class="cm" id="cm"></div></div>
+      <div class="card reveal" data-d="1"><h3 class="eyebrow" style="margin-bottom:10px">Top features · mean |SHAP|</h3><div id="feats"></div></div>
+    </div>
+  </section>
+
+</main>
+
+<footer><div class="wrap">
+  Light-curve data: NASA TESS mission, retrieved from the Mikulski Archive for Space Telescopes (MAST). Catalogs: ExoFOP-TESS and NASA Exoplanet Archive.<br>
+  LunaVisionAI is a research prototype; candidates need follow-up vetting before they are called planets.
+</div></footer>
+
+<script src="/static/common.js"></script>
+<script src="/static/index.js"></script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Target · LunaVisionAI</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,500;1,9..144,500&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500&display=swap">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<canvas id="starfield" aria-hidden="true"></canvas>
+<header class="nav"><div class="wrap">
+  <a class="brand" href="/"><span class="brand-mark"></span>LunaVisionAI</a>
+  <nav class="nav-links"><a href="/#analyze">Analyze</a><a href="/#candidates">← All candidates</a></nav>
+</div></header>
+
+<main class="wrap">
+  <div id="state" class="note" style="padding:64px 0">Loading…</div>
+  <div id="content" hidden>
+    <div class="t-head">
+      <div><span class="eyebrow" id="kind"></span><h1 id="title"></h1><div id="tags" style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap"></div></div>
+      <a class="btn" id="pdf" hidden>Download PDF report</a>
+    </div>
+
+    <div class="t-grid">
+      <div class="card reveal" style="display:grid;place-items:center;gap:14px">
+        <div class="gauge" id="gauge"></div>
+        <div class="bars" id="probs" style="width:100%"></div>
+      </div>
+      <div class="card chart-card reveal" data-d="1"><h3>Detrended light curve · shaded bands mark predicted transits</h3><canvas id="cLc"></canvas></div>
+    </div>
+
+    <div class="two" style="margin-bottom:20px">
+      <div class="card chart-card reveal"><h3>Phase fold · binned median in gold</h3><canvas id="cFold"></canvas><div class="note" id="foldNote"></div></div>
+      <div class="card reveal" data-d="1"><h3 class="eyebrow" style="margin-bottom:14px">Measured features</h3><div class="feat-grid" id="feats"></div></div>
+    </div>
+  </div>
+</main>
+
+<footer><div class="wrap">Light-curve data: NASA TESS mission via MAST. Scores for stars used in training are optimistic.</div></footer>
+<script src="/static/common.js"></script>
+<script src="/static/target.js"></script>
+</body>
+</html>
