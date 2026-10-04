@@ -31,7 +31,10 @@ RAW_DIR = BASE_DIR / "data" / "processed" / "lc_raw"
 DETRENDED_DIR = BASE_DIR / "data" / "processed" / "lc_detrended"
 MODELS_DIR = Path(os.environ.get("LUNA_MODELS_DIR", BASE_DIR / "models"))
 MODEL_PATH = MODELS_DIR / "classifier.joblib"
-ANALYSES_DIR = BASE_DIR / "outputs" / "analyses"
+OUTPUTS_DIR = Path(os.environ.get("LUNA_OUTPUT_DIR", BASE_DIR / "outputs"))
+ANALYSES_DIR = OUTPUTS_DIR / "analyses"
+SUMMARY_DIR = OUTPUTS_DIR / "summaries"
+FEATURES_CSV = BASE_DIR / "data" / "catalogs" / "feature_matrix.csv"
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +46,12 @@ STAGES = [
     ("classify", "Classify"),
     ("finalize", "Assemble result"),
 ]
+
+REPORT_STAGES = [
+    ("fit", "Fit transit model (MCMC)"),
+    ("report", "Vetting plots & PDF"),
+]
+_FIT_KEYS = ["period", "rp_rs", "rp_rearth", "a_au", "teq_k", "inc_deg", "b", "depth_ppm", "t14_hr", "snr", "hz_score"]
 
 _model = None
 _model_lock = threading.Lock()
@@ -327,3 +336,81 @@ def run_target(tic_id: str, on_stage: Optional[Callable[[str, str, dict], None]]
     save_analysis(result)
     emit("finalize", "done", {})
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# On-demand fit + vetting report (stage 6): fitting.py (batman + emcee) then report.py
+# ─────────────────────────────────────────────────────────────────────────────
+def candidate_row(tic: str) -> tuple:
+    """
+    (feature row, p_transit) for fitting. The feature matrix wins when the star is in it; otherwise
+    the saved analysis (uploads and live-fetched stars). Raises ValueError if there is no TLS period.
+    """
+    tic = norm_tic(tic)
+    row, p = None, None
+    if FEATURES_CSV.exists():
+        fm = pd.read_csv(FEATURES_CSV)
+        fm["tic_id"] = fm["tic_id"].map(norm_tic)
+        hit = fm[(fm["tic_id"] == tic) & fm["status"].astype(str).eq("done")]
+        if len(hit):
+            row = hit.iloc[0].to_dict()
+            try:
+                p = _clean(score_rows(pd.DataFrame([row])).iloc[0]["p_transit"])
+            except Exception:                                        # noqa: BLE001
+                p = None
+    if row is None:
+        a = load_analysis(tic)
+        if a is None:
+            raise ValueError(f"{tic} has not been analysed yet. Run the analysis first.")
+        row = dict(a["features"])
+        row["depth"] = (row.get("depth_ppm") or 0.0) / 1e6
+        p = a.get("p_transit")
+    per = row.get("period")
+    if per is None or not np.isfinite(float(per)) or float(per) <= 0:
+        raise ValueError("No transit period was found for this star, so there is nothing to fit.")
+    return row, p
+
+
+def summarize_report(r: dict) -> dict:
+    """The part of report_one()'s result the web UI needs, JSON-safe."""
+    import time
+    res, vet = r["res"], r["vet"]
+    fit = {}
+    for k in _FIT_KEYS:
+        v = res.get(k)
+        if isinstance(v, dict):
+            fit[k] = {"med": _clean(v.get("med")), "lo": _clean(v.get("lo")), "hi": _clean(v.get("hi"))}
+    return {"tic_id": r["tic_id"], "verdict": vet["verdict"], "flags": vet["flags"],
+            "checks": [[n, st, d] for n, st, d in vet["checks"]],
+            "fit": fit, "size_class": res.get("size_class"), "method": res.get("method"),
+            "converged": bool(res.get("converged")), "has_pdf": bool(r.get("pdf")), "made": time.time()}
+
+
+def load_summary(tic: str) -> Optional[dict]:
+    p = SUMMARY_DIR / f"{norm_tic(tic)}.json"
+    return json.loads(p.read_text()) if p.exists() else None
+
+
+def run_fit_report(tic_id: str, on_stage: Optional[Callable[[str, str, dict], None]] = None,
+                   force: bool = False) -> dict:
+    """Fit the transit model, then build the plots + PDF. Returns the summary (also saved to disk)."""
+    emit = on_stage or (lambda *_: None)
+    tic = norm_tic(tic_id)
+
+    emit("fit", "start", {})
+    row, p = candidate_row(tic)
+    from fitting import _run_one
+    res = _run_one(tic, row, OUTPUTS_DIR, {}, force)
+    if res.get("status") != "done":
+        emit("fit", "error", {"reason": str(res.get("status"))})
+        raise ValueError(f"The transit fit failed ({res.get('status')}).")
+    emit("fit", "done", {"method": res.get("method"), "converged": bool(res.get("converged"))})
+
+    emit("report", "start", {})
+    from report import report_one
+    r = report_one(tic, OUTPUTS_DIR, pdf=True, cand={"p_transit": p if p is not None else np.nan})
+    summary = summarize_report(r)
+    SUMMARY_DIR.mkdir(parents=True, exist_ok=True)
+    (SUMMARY_DIR / f"{tic}.json").write_text(json.dumps(summary))
+    emit("report", "done", {"verdict": summary["verdict"]})
+    return summary

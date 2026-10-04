@@ -35,6 +35,15 @@
       <div class="card chart-card reveal"><h3>Phase fold · binned median in gold</h3><canvas id="cFold"></canvas><div class="note" id="foldNote"></div></div>
       <div class="card reveal" data-d="1"><h3 class="eyebrow" style="margin-bottom:14px">Measured features</h3><div class="feat-grid" id="feats"></div></div>
     </div>
+    <section class="card reveal" id="vetCard">
+      <div class="vet-head"><div><span class="eyebrow">Stage 6 · transit-model fit &amp; vetting</span>
+        <h3 style="font-size:24px;margin-top:8px;font-weight:400">Is it a planet?</h3></div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><a class="btn" id="pdfBtn" hidden>Download PDF</a>
+        <button class="btn primary" id="genBtn" type="button">Generate report</button></div></div>
+      <p class="note" id="vetIntro" style="margin:6px 0 0">Fits a physical transit model (batman + MCMC), runs odd/even, secondary-eclipse, centroid and size checks, and builds the seven diagnostic plots and a PDF. Takes about a minute.</p>
+      <ol class="stepper" id="rstepper" hidden><div class="fill" id="rfill"></div></ol>
+      <div id="vetBody"></div>
+    </section>
   </div>
 </main>
 

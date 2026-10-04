@@ -30,12 +30,13 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE_DIR / "src"))
 
 import ingest  # noqa: E402
+import visualization  # noqa: E402
 import pipeline_service as ps  # noqa: E402
 from .jobstore import JobStore  # noqa: E402
 
 FRONTEND = BASE_DIR / "frontend"
 CATALOGS = BASE_DIR / "data" / "catalogs"
-OUTPUTS = BASE_DIR / "outputs"
+OUTPUTS = ps.OUTPUTS_DIR
 LABEL_NAMES = ps.CLASS_NAMES
 
 @asynccontextmanager
@@ -185,7 +186,8 @@ def target_detail(tic: str):
         if saved is None:
             raise HTTPException(404, f"{t} is not in the feature table and has no saved analysis")
         return ok({**saved, "label": None, "label_name": None, "sector": saved["lightcurve"].get("sector"),
-                   "split": ps.split_of(t), "has_report": False})
+                   "split": ps.split_of(t), "has_report": (OUTPUTS / "reports" / f"{t}.pdf").exists(),
+                   "plots": visualization.available_plots(OUTPUTS, t), "vetting": ps.load_summary(t)})
     r = hit.iloc[0]
     try:
         lc = ps.lightcurve_payload(t)
@@ -201,7 +203,31 @@ def target_detail(tic: str):
     return ok({**_row_summary(r), "probabilities": probs,
                "features": {k: r.get(k) for k in feat_keys},
                "lightcurve": lc, "fold": fold,
-               "has_report": (OUTPUTS / "reports" / f"{t}.pdf").exists()})
+               "has_report": (OUTPUTS / "reports" / f"{t}.pdf").exists(),
+               "plots": visualization.available_plots(OUTPUTS, t), "vetting": ps.load_summary(t)})
+
+
+_TIC_RE = r"(TIC_\d{3,12}|SYN_\d+|UPL_[0-9a-f]{8})"
+
+
+@app.post("/api/targets/{tic}/report", status_code=202)
+def create_report(tic: str, force: bool = False):
+    """Fit the transit model and build the vetting plots + PDF in the background (about a minute)."""
+    t = ps.norm_tic(tic)
+    if not re.fullmatch(_TIC_RE, t):
+        raise HTTPException(422, "not a valid target id")
+    if not force and (OUTPUTS / "reports" / f"{t}.pdf").exists() and ps.load_summary(t):
+        return ok({"ready": True, "id": None, "tic_id": t}, 200)
+    job = _enqueue(t, "report")
+    return ok({"ready": False, "id": job["id"], "tic_id": t}, 202)
+
+
+@app.get("/api/targets/{tic}/plots/{name}")
+def target_plot(tic: str, name: str):
+    p = visualization.plot_path(OUTPUTS, ps.norm_tic(tic), name.removesuffix(".png"))
+    if p is None:
+        raise HTTPException(404, "no such plot")
+    return FileResponse(p, media_type="image/png", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/targets/{tic}/report")
@@ -209,7 +235,7 @@ def target_report(tic: str):
     t = ps.norm_tic(tic)
     pdf = OUTPUTS / "reports" / f"{t}.pdf"
     if not pdf.exists():
-        raise HTTPException(404, "no report generated for this target (run src/report.py)")
+        raise HTTPException(404, "no report yet: use \"Generate report\" on the target page")
     return FileResponse(pdf, media_type="application/pdf", filename=f"{t}_report.pdf")
 
 
@@ -235,14 +261,20 @@ def _run_job(job_id: str):
 
     store.set_status(job_id, "running")
     try:
-        result = ps.run_target(job["tic_id"], on_stage)
+        if job["kind"] == "report":
+            result = ps.run_fit_report(job["tic_id"], on_stage)
+        else:
+            result = ps.run_target(job["tic_id"], on_stage)
         store.set_status(job_id, "done", result=_json_safe(result))
     except Exception as e:                                               # noqa: BLE001
-        store.set_status(job_id, "failed", error=str(e) or type(e).__name__)
+        msg = str(e) or type(e).__name__
+        store.fail_running_stage(job_id, msg)
+        store.set_status(job_id, "failed", error=msg)
 
 
-def _enqueue(tic: str) -> dict:
-    job = store.create(TENANT, tic, [{"id": sid, "label": lbl} for sid, lbl in ps.STAGES])
+def _enqueue(tic: str, kind: str = "analyze") -> dict:
+    stages = ps.REPORT_STAGES if kind == "report" else ps.STAGES
+    job = store.create(TENANT, tic, [{"id": sid, "label": lbl} for sid, lbl in stages], kind=kind)
     _executor.submit(_run_job, job["id"])
     return job
 

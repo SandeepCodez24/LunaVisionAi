@@ -44,11 +44,13 @@ class JobStore:
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(_SCHEMA)
+        if "kind" not in {r["name"] for r in self._db.execute("PRAGMA table_info(jobs)")}:
+            self._db.execute("ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'analyze'")
 
     # ── helpers ──────────────────────────────────────────────────────────────
     @staticmethod
     def _row(r: sqlite3.Row) -> dict:
-        return {"id": r["id"], "tenant_id": r["tenant_id"], "tic_id": r["tic_id"], "status": r["status"],
+        return {"id": r["id"], "tenant_id": r["tenant_id"], "tic_id": r["tic_id"], "kind": r["kind"], "status": r["status"],
                 "created": r["created"], "finished": r["finished"], "stages": json.loads(r["stages"]),
                 "result": json.loads(r["result"]) if r["result"] else None,
                 "error": r["error"], "version": r["version"]}
@@ -58,12 +60,12 @@ class JobStore:
         return [{"id": s["id"], "label": s["label"], "state": "pending", "info": {}} for s in stages]
 
     # ── writes ───────────────────────────────────────────────────────────────
-    def create(self, tenant_id: str, tic_id: str, stages: list) -> dict:
+    def create(self, tenant_id: str, tic_id: str, stages: list, kind: str = "analyze") -> dict:
         jid = uuid.uuid4().hex[:12]
         with self._lock:
             self._db.execute(
-                "INSERT INTO jobs (id, tenant_id, tic_id, status, created, stages) VALUES (?,?,?,?,?,?)",
-                (jid, tenant_id, tic_id, "queued", time.time(), json.dumps(self._blank_stages(stages))))
+                "INSERT INTO jobs (id, tenant_id, tic_id, kind, status, created, stages) VALUES (?,?,?,?,?,?,?)",
+                (jid, tenant_id, tic_id, kind, "queued", time.time(), json.dumps(self._blank_stages(stages))))
         return self.get(jid)
 
     def update_stage(self, job_id: str, stage_id: str, state: str, info: dict) -> None:
@@ -77,6 +79,18 @@ class JobStore:
                     s["state"], s["info"] = state, info
             self._db.execute("UPDATE jobs SET stages=?, version=version+1 WHERE id=?",
                              (json.dumps(stages), job_id))
+
+    def fail_running_stage(self, job_id: str, reason: str) -> None:
+        """When a job dies mid-stage, show that stage as failed instead of forever running."""
+        with self._lock:
+            row = self._db.execute("SELECT stages FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                return
+            stages = json.loads(row["stages"])
+            for st in stages:
+                if st["state"] == "start":
+                    st["state"], st["info"] = "error", {"reason": reason}
+            self._db.execute("UPDATE jobs SET stages=? WHERE id=?", (json.dumps(stages), job_id))
 
     def set_status(self, job_id: str, status: str, result: Optional[dict] = None,
                    error: Optional[str] = None) -> None:
@@ -102,7 +116,7 @@ class JobStore:
     def list(self, tenant_id: str, limit: int = 20) -> list:
         with self._lock:
             rows = self._db.execute(
-                "SELECT id, tic_id, status, created, finished, error FROM jobs "
+                "SELECT id, tic_id, kind, status, created, finished, error FROM jobs "
                 "WHERE tenant_id=? ORDER BY created DESC LIMIT ?", (tenant_id, limit)).fetchall()
         return [dict(r) for r in rows]
 

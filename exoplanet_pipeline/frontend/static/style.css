@@ -170,6 +170,33 @@ tbody tr:last-child td{border-bottom:0}
 .nodet{font:12px var(--font-mono);color:var(--ink-2)}
 .chart-sm{width:100%;height:240px;display:block}
 
+/* vetting report */
+.vet-head{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:6px}
+.vbadge{display:inline-flex;align-items:center;gap:10px;font:600 13px var(--font-mono);letter-spacing:.1em;text-transform:uppercase;padding:9px 16px;border-radius:999px;border:1px solid;animation:pop .7s var(--ease) both}
+.vbadge::before{content:"";width:9px;height:9px;border-radius:50%;background:currentColor;box-shadow:0 0 0 0 currentColor;animation:ring2 2s infinite}
+.vbadge.PASS{color:var(--good);border-color:rgba(63,191,143,.5);background:rgba(63,191,143,.08)}
+.vbadge.CAUTION{color:var(--accent);border-color:var(--accent-dim);background:rgba(217,154,53,.08)}
+.vbadge.FP{color:var(--bad);border-color:rgba(230,103,103,.5);background:rgba(230,103,103,.08)}
+@keyframes pop{from{opacity:0;transform:scale(.8)}to{opacity:1;transform:none}}
+@keyframes ring2{0%{box-shadow:0 0 0 0 rgba(255,255,255,.25)}100%{box-shadow:0 0 0 9px rgba(255,255,255,0)}}
+.checks{display:grid;gap:8px;margin:16px 0 4px}
+.check{display:grid;grid-template-columns:22px 150px 1fr;gap:10px;align-items:baseline;font:12px/1.5 var(--font-mono);color:var(--ink-2);opacity:0;transform:translateX(-8px);animation:rowin .5s var(--ease) forwards}
+.check .ic{font-weight:600}.check .ic.PASS{color:var(--good)}.check .ic.FAIL{color:var(--bad)}.check .ic.NA{color:var(--ink-muted)}
+.check b{color:var(--ink);font-weight:500}
+.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px;margin-top:20px}
+.shot{position:relative;border:1px solid var(--hairline);border-radius:12px;overflow:hidden;background:#fff;cursor:zoom-in;aspect-ratio:4/3;opacity:0;transform:translateY(14px) scale(.97);animation:shotin .6s var(--ease) forwards;transition:box-shadow .3s var(--ease),transform .3s var(--ease)}
+.shot:hover{box-shadow:0 0 0 2px var(--accent),0 16px 40px -16px #000;transform:translateY(-3px)}
+.shot img{width:100%;height:100%;object-fit:contain;display:block}
+.shot span{position:absolute;left:0;right:0;bottom:0;padding:18px 12px 8px;background:linear-gradient(transparent,rgba(10,11,20,.88));color:var(--ink);font:11px var(--font-mono);letter-spacing:.08em;text-transform:uppercase}
+@keyframes shotin{to{opacity:1;transform:none}}
+.lightbox{position:fixed;inset:0;z-index:50;background:rgba(5,6,12,.88);backdrop-filter:blur(6px);display:grid;place-items:center;padding:24px;opacity:0;animation:fadein .25s forwards}
+.lightbox img{max-width:min(1100px,94vw);max-height:88vh;background:#fff;border-radius:12px;box-shadow:0 30px 100px #000;transform:scale(.92);animation:zoomin .35s var(--ease) forwards}
+.lightbox button{position:absolute;top:18px;right:22px}
+@keyframes fadein{to{opacity:1}}@keyframes zoomin{to{transform:none}}
+.fit-table{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;margin-top:18px}
+.fit-table .feat b{font-size:19px}.fit-table .feat small{display:block;font:11px var(--font-mono);color:var(--ink-muted);margin-top:2px}
+#rstepper{margin:14px 0 4px}
+
 /* model */
 .metric-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}
 .metric{padding:18px 20px}.metric b{font:300 34px var(--font-display);display:block}.metric span{font:10px var(--font-mono);letter-spacing:.12em;text-transform:uppercase;color:var(--ink-muted)}
