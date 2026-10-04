@@ -7,13 +7,13 @@ Run from exoplanet_pipeline/:
 from __future__ import annotations
 
 import asyncio
+import os
+from contextlib import asynccontextmanager
 import json
 import math
 import re
 import sys
 import threading
-import time
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
@@ -31,13 +31,23 @@ sys.path.insert(0, str(BASE_DIR / "src"))
 
 import ingest  # noqa: E402
 import pipeline_service as ps  # noqa: E402
+from .jobstore import JobStore  # noqa: E402
 
 FRONTEND = BASE_DIR / "frontend"
 CATALOGS = BASE_DIR / "data" / "catalogs"
 OUTPUTS = BASE_DIR / "outputs"
 LABEL_NAMES = ps.CLASS_NAMES
 
-app = FastAPI(title="LunaVisionAI", version="0.1.0")
+@asynccontextmanager
+async def lifespan(_app):
+    """On startup, re-queue jobs a previous run didn't finish; keep the table bounded."""
+    store.prune()
+    for jid in store.recover():
+        _executor.submit(_run_job, jid)
+    yield
+
+
+app = FastAPI(title="LunaVisionAI", version="0.1.0", lifespan=lifespan)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -199,43 +209,31 @@ class JobRequest(BaseModel):
     tic_id: str
 
 
-_jobs: dict[str, dict] = {}
-_jobs_lock = threading.Lock()
+TENANT = "local"                                       # real tenancy arrives with auth (Phase 2)
+store = JobStore(Path(os.environ.get("LUNA_JOBS_DB", ps.BASE_DIR / "outputs" / "jobs.sqlite3")))
 _executor = ThreadPoolExecutor(max_workers=1)        # TLS is heavy; one job at a time locally
 
 
-def _new_job(tic: str) -> dict:
-    return {"id": uuid.uuid4().hex[:12], "tenant_id": "local", "tic_id": tic,
-            "status": "queued", "created": time.time(), "finished": None,
-            "stages": [{"id": sid, "label": lbl, "state": "pending", "info": {}}
-                       for sid, lbl in ps.STAGES],
-            "result": None, "error": None, "version": 0}
+def _run_job(job_id: str):
+    job = store.get(job_id)
+    if job is None:
+        return
 
-
-def _touch(job: dict):
-    job["version"] += 1
-
-
-def _run_job(job: dict):
     def on_stage(stage_id: str, state: str, info: dict):
-        with _jobs_lock:
-            for st in job["stages"]:
-                if st["id"] == stage_id:
-                    st["state"], st["info"] = state, _json_safe(info)
-            _touch(job)
+        store.update_stage(job_id, stage_id, state, _json_safe(info))
 
-    with _jobs_lock:
-        job["status"] = "running"
-        _touch(job)
+    store.set_status(job_id, "running")
     try:
         result = ps.run_target(job["tic_id"], on_stage)
-        with _jobs_lock:
-            job.update(status="done", result=_json_safe(result), finished=time.time())
-            _touch(job)
+        store.set_status(job_id, "done", result=_json_safe(result))
     except Exception as e:                                               # noqa: BLE001
-        with _jobs_lock:
-            job.update(status="failed", error=str(e), finished=time.time())
-            _touch(job)
+        store.set_status(job_id, "failed", error=str(e) or type(e).__name__)
+
+
+def _enqueue(tic: str) -> dict:
+    job = store.create(TENANT, tic, [{"id": sid, "label": lbl} for sid, lbl in ps.STAGES])
+    _executor.submit(_run_job, job["id"])
+    return job
 
 
 @app.post("/api/jobs", status_code=202)
@@ -247,15 +245,9 @@ def create_job(req: JobRequest):
     return ok({"id": job["id"], "tic_id": tic}, 202)
 
 
-def _enqueue(tic: str) -> dict:
-    job = _new_job(tic)
-    with _jobs_lock:
-        _jobs[job["id"]] = job
-        if len(_jobs) > 200:
-            for k in sorted(_jobs, key=lambda k: _jobs[k]["created"])[:50]:
-                _jobs.pop(k, None)
-    _executor.submit(_run_job, job)
-    return job
+@app.get("/api/jobs")
+def list_jobs(limit: int = Query(20, ge=1, le=100)):
+    return ok({"items": store.list(TENANT, limit)})
 
 
 @app.post("/api/jobs/upload", status_code=202)
@@ -275,40 +267,31 @@ def analyses(limit: int = Query(12, ge=1, le=50)):
     return ok({"items": ps.list_analyses(limit)})
 
 
-def _public(job: dict, with_result: bool = True) -> dict:
-    d = {k: v for k, v in job.items() if k != "result"}
-    if with_result:
-        d["result"] = job["result"]
-    return d
-
-
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: str):
-    job = _jobs.get(job_id)
+    job = store.get(job_id)
     if not job:
         raise HTTPException(404, "unknown job")
-    with _jobs_lock:
-        return ok(_public(job))
+    return ok(job)
 
 
 @app.get("/api/jobs/{job_id}/events")
 async def job_events(job_id: str):
-    job = _jobs.get(job_id)
-    if not job:
+    if store.version(job_id) is None:
         raise HTTPException(404, "unknown job")
 
     async def gen():
         seen = -1
         while True:
-            with _jobs_lock:
-                v = job["version"]
-                snap = _public(job) if v != seen else None
-                finished = job["status"] in ("done", "failed")
-            if snap is not None:
-                seen = v
-                yield f"data: {json.dumps(_json_safe(snap))}\n\n"
-            if finished and snap is not None:
+            v = store.version(job_id)
+            if v is None:                                  # pruned while streaming
                 break
+            if v != seen:
+                seen = v
+                snap = store.get(job_id)
+                yield f"data: {json.dumps(_json_safe(snap))}\n\n"
+                if snap["status"] in ("done", "failed"):
+                    break
             await asyncio.sleep(0.25)
 
     return StreamingResponse(gen(), media_type="text/event-stream",

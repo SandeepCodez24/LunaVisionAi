@@ -167,23 +167,40 @@
     }
   }
   let es = null;
+  const LS = { get: (k) => { try { return localStorage.getItem(k); } catch (_) { return null; } },
+               set: (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (_) {} } };
+  function attach(id) {                                      // follow a job's event stream (new or resumed)
+    if (es) es.close();
+    LS.set("lv_job", id);
+    const idle = () => { $("#runBtn").disabled = false; $("#drop").classList.remove("busy"); LS.set("lv_job", null); };
+    $("#runBtn").disabled = true; $("#drop").classList.add("busy");
+    es = new EventSource(`/api/jobs/${id}/events`);
+    es.onmessage = (m) => {
+      const j = JSON.parse(m.data); renderSteps(j.stages);
+      if (j.status === "done") { es.close(); idle(); showResult(j.result); loadRecent(); }
+      if (j.status === "failed") { es.close(); idle(); $("#result").innerHTML = `<div class="error-box">${esc(j.error)}</div>`; }
+    };
+    es.onerror = () => { es.close(); idle(); };
+  }
   function startJob(submit, note) {
     if (es) es.close();
     stepper.querySelectorAll(".step").forEach((n) => n.remove()); $("#stepFill").style.height = 0;
     $("#result").innerHTML = `<div class="placeholder"><span class="mono">Running pipeline…</span><span>${esc(note || "The transit search takes ~20–30 s per star.")}</span></div>`;
     $("#runBtn").disabled = true; $("#drop").classList.add("busy");
-    const idle = () => { $("#runBtn").disabled = false; $("#drop").classList.remove("busy"); };
-    submit()
-      .then(({ id }) => {
-        es = new EventSource(`/api/jobs/${id}/events`);
-        es.onmessage = (m) => {
-          const j = JSON.parse(m.data); renderSteps(j.stages);
-          if (j.status === "done") { es.close(); idle(); showResult(j.result); loadRecent(); }
-          if (j.status === "failed") { es.close(); idle(); $("#result").innerHTML = `<div class="error-box">${esc(j.error)}</div>`; }
-        };
-        es.onerror = () => { es.close(); idle(); };
-      })
-      .catch((e) => { idle(); $("#result").innerHTML = `<div class="error-box">${esc(e.message)}</div>`; });
+    submit().then(({ id }) => attach(id)).catch((e) => {
+      $("#runBtn").disabled = false; $("#drop").classList.remove("busy");
+      $("#result").innerHTML = `<div class="error-box">${esc(e.message)}</div>`;
+    });
+  }
+  async function resumeJob() {                               // page reloaded while a job was running
+    const id = LS.get("lv_job"); if (!id) return;
+    try {
+      const j = await api("/api/jobs/" + id);
+      if (j.status === "queued" || j.status === "running") {
+        $("#result").innerHTML = `<div class="placeholder"><span class="mono">Resuming ${esc(j.tic_id)}…</span><span>Your analysis kept running on the server.</span></div>`;
+        attach(id);
+      } else LS.set("lv_job", null);
+    } catch (_) { LS.set("lv_job", null); }
   }
   function runJob(tic) {
     startJob(() => api("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tic_id: tic }) }),
@@ -225,5 +242,5 @@
     } catch (_) {}
   }
 
-  loadOverview(); loadRows(); loadSamples(); loadRecent();
+  loadOverview(); loadRows(); loadSamples(); loadRecent(); resumeJob();
 })();
