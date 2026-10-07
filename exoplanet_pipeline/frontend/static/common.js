@@ -218,6 +218,29 @@ window.LV = (function () {
   const LABEL_CLS = { Transit: "c0", Other: "c3", "Eclipsing binary": "c1", EB: "c1", Blend: "c2" };
   const tag = (name) => (name ? `<span class="tag ${LABEL_CLS[name] || ""}">${esc(name)}</span>` : `<span class="tag">—</span>`);
 
+  const SPLIT = {
+    "held-out":   { label: "held-out",   cls: "s-held",  note: "Held out from training, so this score is an honest estimate of how the model does on stars it hasn't seen." },
+    "trained-on": { label: "trained on", cls: "s-train", note: "This star was in the training set, so the score is optimistic." },
+    "unseen":     { label: "new star",   cls: "s-held",  note: "This star is in neither the training nor the test split, so the model has not seen it." },
+    "unknown":    { label: "split unknown", cls: "", note: "This model was trained before train/held-out tracking existed, so we can't say whether it saw this star. Retrain to enable it." },
+  };
+  const splitTag = (sp) => { const m = SPLIT[sp]; return m ? `<span class="tag ${m.cls}" title="${esc(m.note)}">${esc(m.label)}</span>` : ""; };
+
+  const STEP_ICON = { done: "✓", error: "!", skip: "–" };
+  function renderStepper(ol, fill, stages, describe) {
+    if (!ol.querySelector(".step")) ol.insertAdjacentHTML("beforeend", stages.map((s) => `<li class="step" data-id="${esc(s.id)}"><span class="dot"></span>${esc(s.label)}<span class="info"></span></li>`).join(""));
+    let lastDone = -1;
+    stages.forEach((s, i) => {
+      const li = ol.querySelector(`[data-id="${s.id}"]`);
+      li.className = "step " + (s.state === "start" ? "running" : s.state === "pending" ? "" : s.state);
+      li.querySelector(".dot").textContent = STEP_ICON[s.state] || "";
+      li.querySelector(".info").textContent = (describe && describe(s)) || (s.info && s.info.reason) || "";
+      if (s.state === "done" || s.state === "skip") lastDone = i;
+    });
+    const items = ol.querySelectorAll(".step"), running = stages.findIndex((s) => s.state === "start"), upto = running >= 0 ? running : lastDone;
+    fill.style.height = upto < 0 ? 0 : (items[upto].offsetTop + 2) + "px";
+  }
+
   document.addEventListener("DOMContentLoaded", () => { starfield(); reveal(); });
-  return { api, num, pct, esc, countUp, reveal, Chart, gauge, bars, lightcurveLayers, foldLayers, foldDomain, foldYDomain, tag, reduce, ease };
+  return { api, num, pct, esc, countUp, reveal, Chart, gauge, bars, lightcurveLayers, foldLayers, foldDomain, foldYDomain, tag, SPLIT, splitTag, renderStepper, reduce, ease };
 })();

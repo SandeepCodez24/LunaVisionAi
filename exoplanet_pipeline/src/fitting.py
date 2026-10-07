@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import time as _time
 import warnings
 from pathlib import Path
@@ -54,7 +55,7 @@ BASE_DIR     = Path(__file__).resolve().parents[1]
 DETRENDED    = BASE_DIR / "data" / "processed" / "lc_detrended"
 CATALOGS_DIR = BASE_DIR / "data" / "catalogs"
 MODELS_DIR   = BASE_DIR / "models"
-OUT_DIR      = BASE_DIR / "outputs"
+OUT_DIR      = Path(os.environ.get("LUNA_OUTPUT_DIR", BASE_DIR / "outputs"))
 
 # ── MCMC settings ────────────────────────────────────────────────────────────
 N_WALKERS    = 32
@@ -97,7 +98,7 @@ def norm_tic(t) -> str:
             t = t[len(pre):]
     if t.endswith(".0"):
         t = t[:-2]
-    return t if t.startswith("SYN_") else f"TIC_{t}"
+    return t if t.startswith(("SYN_", "UPL_")) else f"TIC_{t}"
 
 
 def load_segment(tic_id: str, detrended_dir: Path = DETRENDED) -> dict:

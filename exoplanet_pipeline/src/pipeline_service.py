@@ -11,7 +11,9 @@ Stage code is reused as-is: preprocessing.preprocess_one, features.extract_featu
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import sys
 import threading
 from pathlib import Path
@@ -27,8 +29,12 @@ if str(_SRC) not in sys.path:
 BASE_DIR = _SRC.parent
 RAW_DIR = BASE_DIR / "data" / "processed" / "lc_raw"
 DETRENDED_DIR = BASE_DIR / "data" / "processed" / "lc_detrended"
-MODEL_PATH = BASE_DIR / "models" / "classifier.joblib"
-ANALYSES_DIR = BASE_DIR / "outputs" / "analyses"
+MODELS_DIR = Path(os.environ.get("LUNA_MODELS_DIR", BASE_DIR / "models"))
+MODEL_PATH = MODELS_DIR / "classifier.joblib"
+OUTPUTS_DIR = Path(os.environ.get("LUNA_OUTPUT_DIR", BASE_DIR / "outputs"))
+ANALYSES_DIR = OUTPUTS_DIR / "analyses"
+SUMMARY_DIR = OUTPUTS_DIR / "summaries"
+FEATURES_CSV = BASE_DIR / "data" / "catalogs" / "feature_matrix.csv"
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +46,12 @@ STAGES = [
     ("classify", "Classify"),
     ("finalize", "Assemble result"),
 ]
+
+REPORT_STAGES = [
+    ("fit", "Fit transit model (MCMC)"),
+    ("report", "Vetting plots & PDF"),
+]
+_FIT_KEYS = ["period", "rp_rs", "rp_rearth", "a_au", "teq_k", "inc_deg", "b", "depth_ppm", "t14_hr", "snr", "hz_score"]
 
 _model = None
 _model_lock = threading.Lock()
@@ -64,7 +76,13 @@ def get_model():
 
 
 def score_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """Per-class probabilities for feature rows. Returns columns p_<class>, p_transit, pred."""
+    """
+    Per-class probabilities for feature rows: columns p_<class>, p_transit, pred, detected.
+
+    Stars where TLS found no period get NO score (NaN). Only a handful of training stars had no
+    detection and almost all were planet-side, so the model learned "no detection => Transit" (~0.93),
+    which is an artifact, not evidence.
+    """
     model = get_model()
     X = df.reindex(columns=model.feature_names_)
     proba = model.predict_proba(X)
@@ -72,8 +90,49 @@ def score_rows(df: pd.DataFrame) -> pd.DataFrame:
     for i, c in enumerate(model.classes_):
         out[f"p_{int(c)}"] = proba[:, i]
     out["p_transit"] = out["p_0"] if "p_0" in out else np.nan
-    out["pred"] = [int(model.classes_[k]) for k in np.argmax(proba, axis=1)]
+    out["pred"] = [float(model.classes_[k]) for k in np.argmax(proba, axis=1)]
+    detected = pd.to_numeric(df.get("period"), errors="coerce").notna().to_numpy() if "period" in df else np.zeros(len(df), bool)
+    out["detected"] = detected
+    undetected = ~detected
+    score_cols = [c for c in out.columns if c.startswith("p_")] + ["pred"]
+    out.loc[undetected, score_cols] = np.nan
     return out
+
+
+_split_cache: dict = {"key": None, "val": None}
+
+
+def load_split() -> Optional[dict]:
+    """
+    The train/held-out star lists, but only if they belong to the loaded model: split.json and
+    metrics.json must carry the same split_id. Models trained before this existed have none, and
+    then we say "unknown" rather than guess which stars were held out.
+    """
+    sp, mp = MODELS_DIR / "split.json", MODELS_DIR / "metrics.json"
+    if not (sp.exists() and mp.exists()):
+        return None
+    key = (sp.stat().st_mtime, mp.stat().st_mtime)
+    if _split_cache["key"] != key:
+        val = None
+        try:
+            manifest, metrics = json.loads(sp.read_text()), json.loads(mp.read_text())
+            if manifest.get("split_id") and manifest["split_id"] == metrics.get("split_id"):
+                val = {"id": manifest["split_id"], "test": set(manifest["test"]), "train": set(manifest["train"])}
+        except Exception:                                            # noqa: BLE001
+            val = None
+        _split_cache.update(key=key, val=val)
+    return _split_cache["val"]
+
+
+def split_of(tic: str) -> str:
+    """held-out | trained-on | unseen (not in the model's split) | synthetic | unknown (no valid split)."""
+    t = norm_tic(tic)
+    if t.startswith("SYN_"):
+        return "synthetic"
+    sp = load_split()
+    if sp is None:
+        return "unknown"
+    return "held-out" if t in sp["test"] else "trained-on" if t in sp["train"] else "unseen"
 
 
 def lightcurve_payload(tic: str, max_points: int = 900, fold_bins: int = 160) -> dict:
@@ -249,7 +308,8 @@ def run_target(tic_id: str, on_stage: Optional[Callable[[str, str, dict], None]]
     # 4. classify
     emit("classify", "start", {})
     scores = score_rows(pd.DataFrame([row])).iloc[0].to_dict()
-    emit("classify", "done", {"p_transit": _clean(scores.get("p_transit"))})
+    detected = bool(scores.get("detected"))
+    emit("classify", "done", {"p_transit": _clean(scores.get("p_transit")), "detected": detected})
 
     # 5. finalize: plot payloads
     emit("finalize", "start", {})
@@ -257,15 +317,15 @@ def run_target(tic_id: str, on_stage: Optional[Callable[[str, str, dict], None]]
     t_raw, f_raw = lc.pop("_raw")
     fold = fold_payload(t_raw, f_raw, float(row.get("period", np.nan)), float(row.get("t0", np.nan)),
                         dur_hr=float(row.get("duration_hr", np.nan)))
-    probs = {CLASS_NAMES[int(k[2:])]: _clean(v) for k, v in scores.items()
-             if k.startswith("p_") and k[2:].isdigit()}
+    probs = ({CLASS_NAMES[int(k[2:])]: _clean(v) for k, v in scores.items() if k.startswith("p_") and k[2:].isdigit()}
+             if detected else {})
     result = {
-        "tic_id": tic, "source": source,
+        "tic_id": tic, "source": source, "detected": detected, "split": split_of(tic),
         "kind": "upload" if tic.startswith("UPL_") else "synthetic" if tic.startswith("SYN_") else "real",
-        "pred": CLASS_NAMES.get(int(scores["pred"]), str(scores["pred"])),
-        "p_transit": _clean(scores.get("p_transit")),
+        "pred": CLASS_NAMES.get(int(scores["pred"]), str(scores["pred"])) if detected else "No detection",
+        "p_transit": _clean(scores.get("p_transit")) if detected else None,
         "probabilities": probs,
-        "is_candidate": bool((scores.get("p_transit") or 0) >= 0.5),
+        "is_candidate": bool(detected and (scores.get("p_transit") or 0) >= 0.5),
         "features": clean_row({k: row.get(k) for k in (
             "period", "t0", "depth_ppm", "duration_hr", "SDE", "SNR", "FAP", "transit_count",
             "rp_rs", "odd_even_ratio", "secondary_ratio", "centroid_proxy",
@@ -276,3 +336,81 @@ def run_target(tic_id: str, on_stage: Optional[Callable[[str, str, dict], None]]
     save_analysis(result)
     emit("finalize", "done", {})
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# On-demand fit + vetting report (stage 6): fitting.py (batman + emcee) then report.py
+# ─────────────────────────────────────────────────────────────────────────────
+def candidate_row(tic: str) -> tuple:
+    """
+    (feature row, p_transit) for fitting. The feature matrix wins when the star is in it; otherwise
+    the saved analysis (uploads and live-fetched stars). Raises ValueError if there is no TLS period.
+    """
+    tic = norm_tic(tic)
+    row, p = None, None
+    if FEATURES_CSV.exists():
+        fm = pd.read_csv(FEATURES_CSV)
+        fm["tic_id"] = fm["tic_id"].map(norm_tic)
+        hit = fm[(fm["tic_id"] == tic) & fm["status"].astype(str).eq("done")]
+        if len(hit):
+            row = hit.iloc[0].to_dict()
+            try:
+                p = _clean(score_rows(pd.DataFrame([row])).iloc[0]["p_transit"])
+            except Exception:                                        # noqa: BLE001
+                p = None
+    if row is None:
+        a = load_analysis(tic)
+        if a is None:
+            raise ValueError(f"{tic} has not been analysed yet. Run the analysis first.")
+        row = dict(a["features"])
+        row["depth"] = (row.get("depth_ppm") or 0.0) / 1e6
+        p = a.get("p_transit")
+    per = row.get("period")
+    if per is None or not np.isfinite(float(per)) or float(per) <= 0:
+        raise ValueError("No transit period was found for this star, so there is nothing to fit.")
+    return row, p
+
+
+def summarize_report(r: dict) -> dict:
+    """The part of report_one()'s result the web UI needs, JSON-safe."""
+    import time
+    res, vet = r["res"], r["vet"]
+    fit = {}
+    for k in _FIT_KEYS:
+        v = res.get(k)
+        if isinstance(v, dict):
+            fit[k] = {"med": _clean(v.get("med")), "lo": _clean(v.get("lo")), "hi": _clean(v.get("hi"))}
+    return {"tic_id": r["tic_id"], "verdict": vet["verdict"], "flags": vet["flags"],
+            "checks": [[n, st, d] for n, st, d in vet["checks"]],
+            "fit": fit, "size_class": res.get("size_class"), "method": res.get("method"),
+            "converged": bool(res.get("converged")), "has_pdf": bool(r.get("pdf")), "made": time.time()}
+
+
+def load_summary(tic: str) -> Optional[dict]:
+    p = SUMMARY_DIR / f"{norm_tic(tic)}.json"
+    return json.loads(p.read_text()) if p.exists() else None
+
+
+def run_fit_report(tic_id: str, on_stage: Optional[Callable[[str, str, dict], None]] = None,
+                   force: bool = False) -> dict:
+    """Fit the transit model, then build the plots + PDF. Returns the summary (also saved to disk)."""
+    emit = on_stage or (lambda *_: None)
+    tic = norm_tic(tic_id)
+
+    emit("fit", "start", {})
+    row, p = candidate_row(tic)
+    from fitting import _run_one
+    res = _run_one(tic, row, OUTPUTS_DIR, {}, force)
+    if res.get("status") != "done":
+        emit("fit", "error", {"reason": str(res.get("status"))})
+        raise ValueError(f"The transit fit failed ({res.get('status')}).")
+    emit("fit", "done", {"method": res.get("method"), "converged": bool(res.get("converged"))})
+
+    emit("report", "start", {})
+    from report import report_one
+    r = report_one(tic, OUTPUTS_DIR, pdf=True, cand={"p_transit": p if p is not None else np.nan})
+    summary = summarize_report(r)
+    SUMMARY_DIR.mkdir(parents=True, exist_ok=True)
+    (SUMMARY_DIR / f"{tic}.json").write_text(json.dumps(summary))
+    emit("report", "done", {"verdict": summary["verdict"]})
+    return summary

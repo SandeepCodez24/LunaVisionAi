@@ -83,24 +83,25 @@
   <section class="block" id="candidates">
     <div class="sec-head reveal">
       <div><span class="eyebrow">Explore</span><h2>Candidate explorer</h2>
-      <p>Real TESS stars ranked by the classifier's transit probability. Click a row for the full light curve and phase fold.</p></div>
+      <p>Real TESS stars ranked by the model's score. Click a row for the full light curve and phase fold.</p></div>
     </div>
     <div class="filters reveal">
       <input type="search" id="q" placeholder="Search TIC…" aria-label="Search TIC">
       <select id="fLabel" aria-label="Catalog label"><option value="">All catalog labels</option><option value="0">Transit (catalog)</option><option value="3">Other (catalog)</option></select>
+      <select id="fSplit" aria-label="Train or held-out"><option value="">All stars</option><option value="held-out">Held-out only (honest scores)</option><option value="trained-on">Trained on</option></select>
       <label>min P(transit) <input type="range" id="fMin" min="0" max="0.95" step="0.05" value="0"><b id="fMinVal" class="mono">0%</b></label>
     </div>
     <div class="table-card reveal">
       <table>
         <thead><tr>
-          <th data-sort="tic_id">TIC</th><th>Catalog</th><th data-sort="p_transit" class="sorted">P(transit)</th>
+          <th data-sort="tic_id">TIC</th><th>Catalog</th><th>Model saw it?</th><th data-sort="p_transit" class="sorted">Model score</th>
           <th data-sort="period">Period (d)</th><th data-sort="depth_ppm">Depth (ppm)</th><th data-sort="SDE">SDE</th>
         </tr></thead>
         <tbody id="rows"></tbody>
       </table>
       <div class="table-foot"><span id="count">—</span><button class="btn" id="more" hidden>Load more</button></div>
     </div>
-    <p class="note">Scores for stars the model trained on are optimistic. For honest accuracy, use the held-out metrics below.</p>
+    <div class="callout reveal" id="splitNote"></div>
   </section>
 
   <!-- Model -->
@@ -110,10 +111,13 @@
       <p>Stacked XGBoost, LightGBM and HistGradientBoosting with Platt calibration, evaluated on stars held out by TIC ID.</p></div>
     </div>
     <div class="metric-grid reveal" id="metrics"></div>
+    <div class="callout warn reveal"><b>What the score means.</b> It is how much a star's measured features resemble catalog planet-side stars, learned from a training mix that is about two-thirds planet-side. It is <b>not</b> the probability that a planet exists. See the calibration chart below for how far scores can be trusted.</div>
     <div class="two">
       <div class="card reveal"><h3 class="eyebrow" style="margin-bottom:16px">Confusion matrix · held-out</h3><div class="cm" id="cm"></div></div>
       <div class="card reveal" data-d="1"><h3 class="eyebrow" style="margin-bottom:10px">Top features · mean |SHAP|</h3><div id="feats"></div></div>
     </div>
+    <div class="card reveal" style="margin-top:20px"><h3 class="eyebrow" style="margin-bottom:6px">Calibration · held-out stars</h3>
+      <p class="note" style="margin:0 0 10px" id="calNote"></p><canvas id="cCal" class="chart-sm"></canvas></div>
   </section>
 
 </main>

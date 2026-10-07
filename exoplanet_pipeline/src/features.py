@@ -264,7 +264,7 @@ def extract_stellar_features(tic_id: str) -> dict:
 # MASTER FEATURE EXTRACTOR — single light curve
 # ─────────────────────────────────────────────────────────────────────────────
 
-def extract_features_one(npz_path: Path, label: int = -1) -> dict:
+def extract_features_one(npz_path: Path, label: int = -1, tls_cache: Optional[dict] = None) -> dict:
     """
     Run TLS and extract all 35+ features for a single detrended light curve.
     Heavy array operations are dispatched to the GPU via gpu_features.py.
@@ -273,6 +273,8 @@ def extract_features_one(npz_path: Path, label: int = -1) -> dict:
     ----------
     npz_path : path to detrended .npz file
     label    : class label (0=Transit, 1=EB, 2=Blend, 3=Other, -1=Unknown)
+    tls_cache: optional {tic_id: geometry-feature dict} from the detection stage.
+               A hit skips the TLS search (the slow part) and reuses period/t0/etc.
 
     Returns
     -------
@@ -301,8 +303,11 @@ def extract_features_one(npz_path: Path, label: int = -1) -> dict:
     log.debug("  Extracting features: %s", tic_id)
 
     # ── Cat 1/2: TLS geometry + signal quality ────────────────────────────────
-    tls_results = run_tls(time, flat_flux)
-    geom_feat   = extract_geometry_features(tls_results, baseline)
+    cached = (tls_cache or {}).get(tic_id) or (tls_cache or {}).get(npz_path.stem)
+    if cached is not None:
+        geom_feat = cached
+    else:
+        geom_feat = extract_geometry_features(run_tls(time, flat_flux), baseline)
 
     period      = geom_feat.get("period",      np.nan)
     t0          = geom_feat.get("t0",          np.nan)
@@ -414,6 +419,7 @@ def extract_features_batch(
     resume:        bool         = True,
     timeout_sec:   int          = TASK_TIMEOUT_SEC,
     checkpoint_n:  int          = CHECKPOINT_EVERY,
+    detections_csv: Optional[Path] = None,
 ) -> pd.DataFrame:
     """
     Extract features for all detrended .npz files in detrended_dir.
@@ -427,6 +433,8 @@ def extract_features_batch(
     resume        : skip already-processed tic_ids in existing CSV
     timeout_sec   : kill any single extraction after this many seconds
     checkpoint_n  : write a batch to disk every this many rows
+    detections_csv: detection-stage CSV (detect_batch / orchestrator scan output);
+                    its TLS results are reused instead of re-running TLS per curve
 
     Returns
     -------
@@ -502,13 +510,24 @@ def extract_features_batch(
                 label_map.update({_norm(t): int(l) for t, l in zip(ldf["tic_id"], ldf["label"])
                                   if l == l})
 
+    # TLS results already computed by the detection stage (same windowed input)
+    tls_cache: dict[str, dict] = {}
+    if detections_csv and Path(detections_csv).exists():
+        _geo = ["period", "depth", "depth_ppm", "duration_hr", "transit_count",
+                "SDE", "SNR", "FAP", "phase_coverage", "t0", "rp_rs"]
+        ddf = pd.read_csv(detections_csv, dtype={"tic_id": str})
+        if "tic_id" in ddf.columns and all(c in ddf.columns for c in _geo):
+            tls_cache = {str(r["tic_id"]): {c: r[c] for c in _geo}
+                         for _, r in ddf.drop_duplicates("tic_id", keep="last").iterrows()}
+            log.info("Reusing TLS results for %d curves from %s", len(tls_cache), detections_csv)
+
     # ── Worker wrapper with timeout ───────────────────────────────────────────
     def _worker(f: Path) -> dict:
         """Run extraction with per-task timeout."""
         label = label_map.get(_norm(f.stem), -1)
         try:
             return _run_with_timeout(
-                extract_features_one, args=(f, label), timeout_sec=timeout_sec
+                extract_features_one, args=(f, label, tls_cache), timeout_sec=timeout_sec
             )
         except _TimeoutError:
             log.warning("  TIMEOUT (%ds) for %s — skipping.", timeout_sec, f.stem)
